@@ -71,7 +71,7 @@ function calculateRSI(data: number[], period: number): (number | null)[] {
 export const Backtesting: React.FC = () => {
   const [symbol, setSymbol] = useState('BTC-USDC');
   const [strategy, setStrategy] = useState<StrategyType>('SMA_CROSS');
-  const [interval, setTimeframe] = useState('1h');
+  const [timeframe, setTimeframe] = useState('1h');
   const [candles, setCandles] = useState('200');
   const [param1, setParam1] = useState('7');
   const [param2, setParam2] = useState('25');
@@ -83,7 +83,7 @@ export const Backtesting: React.FC = () => {
     setResult(null);
 
     try {
-      const rawKlines = await fetchKlines(symbol, interval, parseInt(candles) || 200, 'perps');
+      const rawKlines = await fetchKlines(symbol, timeframe, parseInt(candles) || 200, 'perps');
       const klines = Array.isArray(rawKlines) ? rawKlines : [];
 
       if (klines.length < 30) {
@@ -292,7 +292,7 @@ export const Backtesting: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [symbol, strategy, interval, candles, param1, param2]);
+  }, [symbol, strategy, timeframe, candles, param1, param2]);
 
   const strategyLabels: Record<StrategyType, { name: string; p1: string; p2: string }> = {
     SMA_CROSS: { name: 'SMA Crossover', p1: 'Hizli SMA', p2: 'Yavas SMA' },
@@ -336,7 +336,7 @@ export const Backtesting: React.FC = () => {
           />
           <Select
             label="Zaman Dilimi"
-            value={interval}
+            value={timeframe}
             onChange={(e) => setTimeframe(e.target.value)}
             options={[
               { value: '5m', label: '5 Dakika' },
