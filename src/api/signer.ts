@@ -18,6 +18,19 @@ export const EIP712_TYPES = {
   ],
 };
 
+/**
+ * Monotonic nonce generator.
+ * Guarantees a strictly increasing nonce even when multiple requests are
+ * dispatched within the same millisecond, preventing nonce-collision
+ * signature rejections from the exchange.
+ */
+let _lastNonce = BigInt(0);
+export function getMonotonicNonce(): string {
+  const now = BigInt(Date.now());
+  _lastNonce = now > _lastNonce ? now : _lastNonce + BigInt(1);
+  return _lastNonce.toString();
+}
+
 export async function signPayload(
   payload: any,
   privateKey: string,
@@ -25,7 +38,7 @@ export async function signPayload(
   isTestnet: boolean
 ): Promise<{ signature: string; nonce: string }> {
   const wallet = new ethers.Wallet(privateKey);
-  const nonce = BigInt(Date.now()).toString();
+  const nonce = getMonotonicNonce();
   
   const payloadString = JSON.stringify(payload || {});
   const payloadHash = ethers.keccak256(ethers.toUtf8Bytes(payloadString));

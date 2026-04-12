@@ -3,7 +3,7 @@ import toast from 'react-hot-toast';
 import { Play, Square, BarChart3, Hash, DollarSign, Activity, Wallet, ShieldAlert, TrendingUp } from 'lucide-react';
 import { useBotStore } from '../store/botStore';
 import { useSettingsStore } from '../store/settingsStore';
-import { placeOrder, fetchOrderbook, fetchFeeRate, normalizeSymbol } from '../api/services';
+import { placeOrder, fetchOrderbook, fetchFeeRate, normalizeSymbol, fetchOrderStatus } from '../api/services';
 import type { FeeRateInfo } from '../api/services';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -13,9 +13,55 @@ import { Input } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 
 const DEFAULT_INTERVAL_SEC = 10;
+/** Stop bot after this many consecutive attempts where no fill could be verified. */
+const MAX_CONSECUTIVE_UNVERIFIED = 5;
 
 function getLeverage(isSpot: boolean, leverage: string): number {
   return isSpot ? 1 : (parseInt(leverage) || 1);
+}
+
+/**
+ * Classify an API error into a human-readable category so the log is actionable.
+ */
+function classifyError(err: any): string {
+  const status: number = err?.response?.status ?? 0;
+  const body: string = (err?.response?.data?.message ?? err?.response?.data?.error ?? err?.message ?? '').toLowerCase();
+
+  if (status === 401 || status === 403 || body.includes('signature') || body.includes('auth') || body.includes('nonce')) {
+    return 'AUTH/SIGNATURE ERROR — check API key, private key, and nonce';
+  }
+  if (body.includes('insufficient') || body.includes('balance') || body.includes('margin')) {
+    return 'INSUFFICIENT BALANCE — add funds or reduce quantity';
+  }
+  if (body.includes('invalid symbol') || body.includes('unknown symbol') || status === 404) {
+    return 'INVALID SYMBOL — check symbol format (spot: BTC-USDC, perps: BTC-USD)';
+  }
+  if (status === 429 || body.includes('rate limit') || body.includes('too many')) {
+    return 'RATE LIMIT — slow down interval or reduce frequency';
+  }
+  if (body.includes('self') || body.includes('wash') || body.includes('stp')) {
+    return 'SELF-TRADE PREVENTION — exchange blocked self-match';
+  }
+  if (body.includes('not filled') || body.includes('ioc') || body.includes('cancelled')) {
+    return 'ORDER NOT FILLED — IOC cancelled or no matching liquidity';
+  }
+  return err?.response?.data?.message ?? err?.message ?? 'Unknown error';
+}
+
+/**
+ * Extract fill information from a placeOrder response (some exchanges embed it).
+ * Returns undefined if the response does not contain reliable fill data.
+ */
+function extractInlineFill(res: any): { filledQty: number; avgFillPrice: number; status: string } | undefined {
+  if (!res || typeof res !== 'object') return undefined;
+  const status: string = res.status ?? res.orderStatus ?? '';
+  const filledQty = parseFloat(res.filledQty ?? res.executedQty ?? res.filled_qty ?? res.cumQty ?? '0') || 0;
+  const avgFillPrice = parseFloat(res.avgFillPrice ?? res.avgPrice ?? res.avg_price ?? '0') || 0;
+  // Only trust inline fill if the status is explicit or we have both filled qty and price
+  if ((status && !['OPEN', 'NEW', ''].includes(status.toUpperCase())) || (filledQty > 0 && avgFillPrice > 0)) {
+    return { filledQty, avgFillPrice, status: status || (filledQty > 0 ? 'FILLED' : 'OPEN') };
+  }
+  return undefined;
 }
 
 export const VolumeBot: React.FC = () => {
@@ -24,6 +70,7 @@ export const VolumeBot: React.FC = () => {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const runningRef = useRef(false);
   const feeRateRef = useRef<FeeRateInfo>({ makerFee: 0.00012, takerFee: 0.0004 });
+  const consecutiveUnverifiedRef = useRef(0);
   const [showConfirm, setShowConfirm] = useState(false);
 
   const executeTrade = useCallback(async () => {
@@ -52,6 +99,7 @@ export const VolumeBot: React.FC = () => {
     const leverageVal = getLeverage(s.isSpot, s.leverage);
     const effectiveBudget = budgetVal * leverageVal;
     const hasBudget = budgetVal > 0;
+    const normalizedSym = normalizeSymbol(s.symbol, market);
 
     try {
       const orderbook = await fetchOrderbook(s.symbol, market, 5);
@@ -59,7 +107,7 @@ export const VolumeBot: React.FC = () => {
       const bestAsk = orderbook?.asks?.[0]?.[0] ?? orderbook?.asks?.[0]?.price;
 
       if (!bestBid || !bestAsk) {
-        s.addLog({ time: new Date().toLocaleTimeString(), message: `${s.symbol} için emir defteri verisi bulunamadı` });
+        s.addLog({ time: new Date().toLocaleTimeString(), message: `[${market.toUpperCase()}] ${normalizedSym}: emir defteri verisi bulunamadı` });
         return;
       }
 
@@ -68,7 +116,7 @@ export const VolumeBot: React.FC = () => {
       const midPrice = (bidPrice + askPrice) / 2;
 
       if (midPrice <= 0) {
-        s.addLog({ time: new Date().toLocaleTimeString(), message: `${s.symbol} için geçersiz fiyat. Atlanıyor.` });
+        s.addLog({ time: new Date().toLocaleTimeString(), message: `[${market.toUpperCase()}] ${normalizedSym}: geçersiz fiyat. Atlanıyor.` });
         return;
       }
 
@@ -76,22 +124,19 @@ export const VolumeBot: React.FC = () => {
 
       const spreadTol = parseFloat(s.spreadTolerance);
       if (spreadTol > 0 && spread > spreadTol) {
-        s.addLog({ time: new Date().toLocaleTimeString(), message: `Spread çok geniş (${spread.toFixed(2)}% > ${spreadTol}%). Atlanıyor.` });
+        s.addLog({ time: new Date().toLocaleTimeString(), message: `[${market.toUpperCase()}] ${normalizedSym}: spread çok geniş (${spread.toFixed(2)}% > ${spreadTol}%). Atlanıyor.` });
         return;
       }
 
       let min = parseFloat(s.minAmount);
       let max = parseFloat(s.maxAmount);
 
-      // Budget mode: cap quantity so each trade's notional value doesn't exceed effective budget
-      // With leverage: effectiveBudget = budget × leverage (e.g., $200 × 10x = $2000 position)
       if (hasBudget) {
         const maxQtyByBudget = effectiveBudget / midPrice;
         max = Math.min(max, maxQtyByBudget);
         min = Math.min(min, max);
       }
 
-      // Budget mode with maxSpend: cap quantity so fee doesn't push us over max spend
       if (maxSpendLimit > 0) {
         const spendRemaining = maxSpendLimit - s.totalSpent;
         if (spendRemaining <= 0) {
@@ -100,7 +145,6 @@ export const VolumeBot: React.FC = () => {
           s.addLog({ time: new Date().toLocaleTimeString(), message: `Max harcama limiti ($${maxSpendLimit.toFixed(2)}) doldu. Bot durdu.` });
           return;
         }
-        // Each trade costs maker+taker fee (buy+sell), cap quantity so fees stay within limit
         const { makerFee, takerFee } = feeRateRef.current;
         const combinedFeeRate = makerFee + takerFee;
         const maxQtyBySpend = spendRemaining / (midPrice * combinedFeeRate);
@@ -115,47 +159,111 @@ export const VolumeBot: React.FC = () => {
 
       const quantity = min + Math.random() * (max - min);
 
-      // Smart strategy: use LIMIT orders at mid-price (maker) for lower fees
-      // If budget mode is active, place both BUY and SELL at mid-price to self-match
-      // producing volume with zero price risk and only paying fees
       if (hasBudget) {
-        // Place BUY and SELL LIMIT at mid-price to create volume with minimal cost
+        // Budget mode: place BUY and SELL LIMIT IOC at mid-price
         const limitPrice = midPrice.toString();
         const qty = quantity.toFixed(8);
 
-        // Place BUY
+        s.addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `[${market.toUpperCase()}] ${normalizedSym}: BUY+SELL IOC @ ${midPrice} qty=${qty} — emir gönderiliyor…`,
+        });
+
         const buyResult = await placeOrder(
-          { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: limitPrice, timeInForce: 3 }, // side:1=BUY, type:1=LIMIT, timeInForce:3=IOC
+          { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: limitPrice, timeInForce: 3 },
           market,
         );
-        // Place SELL at same price to self-match for volume
         const sellResult = await placeOrder(
-          { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: limitPrice, timeInForce: 3 }, // side:2=SELL, type:1=LIMIT, timeInForce:3=IOC
+          { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: limitPrice, timeInForce: 3 },
           market,
         );
 
-        const vol = quantity * midPrice * 2; // Both sides create volume
-        // First order rests as maker, second order hits it as taker
-        const fee = quantity * midPrice * (feeRateRef.current.makerFee + feeRateRef.current.takerFee);
+        const buyOrderId: string = buyResult?.orderId ?? buyResult?.id ?? '';
+        const sellOrderId: string = sellResult?.orderId ?? sellResult?.id ?? '';
+
+        s.addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `[${market.toUpperCase()}] ${normalizedSym}: BUY orderId=${buyOrderId || 'N/A'} SELL orderId=${sellOrderId || 'N/A'} — fill doğrulanıyor…`,
+        });
+
+        // Allow the exchange a moment to process IOC orders before querying status
+        await new Promise((r) => setTimeout(r, 800));
+
+        // Resolve fill data: prefer inline response, fall back to API status query
+        let buyFill = extractInlineFill(buyResult);
+        if (!buyFill && buyOrderId) {
+          const st = await fetchOrderStatus(buyOrderId, s.symbol, market);
+          if (st) buyFill = { filledQty: st.filledQty, avgFillPrice: st.avgFillPrice, status: st.status };
+        }
+
+        let sellFill = extractInlineFill(sellResult);
+        if (!sellFill && sellOrderId) {
+          const st = await fetchOrderStatus(sellOrderId, s.symbol, market);
+          if (st) sellFill = { filledQty: st.filledQty, avgFillPrice: st.avgFillPrice, status: st.status };
+        }
+
+        // If we couldn't verify either order, increment failure counter
+        if (!buyFill && !sellFill) {
+          consecutiveUnverifiedRef.current += 1;
+          const msg = `[${market.toUpperCase()}] ${normalizedSym}: Fill doğrulanamadı (orderId=${buyOrderId || 'N/A'}/${sellOrderId || 'N/A'}). Hacim sayılmadı. (${consecutiveUnverifiedRef.current}/${MAX_CONSECUTIVE_UNVERIFIED})`;
+          s.addLog({ time: new Date().toLocaleTimeString(), message: msg });
+          if (consecutiveUnverifiedRef.current >= MAX_CONSECUTIVE_UNVERIFIED) {
+            runningRef.current = false;
+            s.setField('status', 'STOPPED');
+            s.addLog({ time: new Date().toLocaleTimeString(), message: `${MAX_CONSECUTIVE_UNVERIFIED} ardışık doğrulanamaz işlem — bot durduruldu. Loglara bakın.` });
+          }
+          return;
+        }
+
+        // Count only what was actually filled on each side
+        const buyVol = (buyFill?.filledQty ?? 0) * (buyFill?.avgFillPrice ?? midPrice);
+        const sellVol = (sellFill?.filledQty ?? 0) * (sellFill?.avgFillPrice ?? midPrice);
+        const totalFillVol = buyVol + sellVol;
+
+        if (totalFillVol <= 0) {
+          consecutiveUnverifiedRef.current += 1;
+          const bStatus = buyFill?.status ?? 'N/A';
+          const sStatus = sellFill?.status ?? 'N/A';
+          s.addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `[${market.toUpperCase()}] ${normalizedSym}: Hiç fill yok — BUY=${bStatus} SELL=${sStatus}. Olası nedenler: STP, likidite yok, IOC iptal. (${consecutiveUnverifiedRef.current}/${MAX_CONSECUTIVE_UNVERIFIED})`,
+          });
+          if (consecutiveUnverifiedRef.current >= MAX_CONSECUTIVE_UNVERIFIED) {
+            runningRef.current = false;
+            s.setField('status', 'STOPPED');
+            s.addLog({ time: new Date().toLocaleTimeString(), message: `${MAX_CONSECUTIVE_UNVERIFIED} ardışık fill'siz işlem — bot durduruldu.` });
+          }
+          return;
+        }
+
+        // Successful fill — reset failure counter and record stats
+        consecutiveUnverifiedRef.current = 0;
+
+        const filledQtyBuy = buyFill?.filledQty ?? 0;
+        const filledQtySell = sellFill?.filledQty ?? 0;
+        const filledQtyAvg = (filledQtyBuy + filledQtySell) / (filledQtyBuy > 0 && filledQtySell > 0 ? 2 : 1);
+        const fee = filledQtyAvg * midPrice * (feeRateRef.current.makerFee + feeRateRef.current.takerFee);
 
         const freshState = useBotStore.getState().volumeBot;
         const prevCount = freshState.tradesCount;
         const prevSpread = freshState.avgSpread;
+        const tradeSides = (filledQtyBuy > 0 ? 1 : 0) + (filledQtySell > 0 ? 1 : 0);
 
-        freshState.setField('totalVolume', freshState.totalVolume + vol);
-        freshState.setField('tradesCount', prevCount + 2);
+        freshState.setField('totalVolume', freshState.totalVolume + totalFillVol);
+        freshState.setField('tradesCount', prevCount + tradeSides);
         freshState.setField('totalFee', freshState.totalFee + fee);
         freshState.setField('totalSpent', freshState.totalSpent + fee);
-        freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / (prevCount + 2));
+        freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / (prevCount + tradeSides));
 
         freshState.addLog({
           time: new Date().toLocaleTimeString(),
-          symbol: s.symbol,
+          symbol: normalizedSym,
           side: 'BUY+SELL',
-          amount: quantity,
+          amount: filledQtyAvg,
           price: midPrice,
           fee,
-          orderId: `${buyResult?.orderId ?? buyResult?.id ?? 'N/A'} / ${sellResult?.orderId ?? sellResult?.id ?? 'N/A'}`,
+          orderId: `${buyOrderId || 'N/A'} / ${sellOrderId || 'N/A'}`,
+          message: `[${market.toUpperCase()}] Fill doğrulandı: BUY ${filledQtyBuy.toFixed(8)}@${buyFill?.avgFillPrice?.toFixed(4) ?? midPrice} SELL ${filledQtySell.toFixed(8)}@${sellFill?.avgFillPrice?.toFixed(4) ?? midPrice} → hacim $${totalFillVol.toFixed(4)}`,
         });
       } else {
         // Classic mode: single market order
@@ -163,13 +271,66 @@ export const VolumeBot: React.FC = () => {
         const sideLabel = side === 1 ? 'BUY' : 'SELL';
         const fillPrice = side === 1 ? askPrice : bidPrice;
 
+        s.addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `[${market.toUpperCase()}] ${normalizedSym}: ${sideLabel} MARKET qty=${quantity.toFixed(8)} @ ~${fillPrice} — emir gönderiliyor…`,
+        });
+
         const result = await placeOrder(
           { symbol: s.symbol, side, type: 2, quantity: quantity.toFixed(8) },
           market,
         );
 
-        const vol = quantity * fillPrice;
-        const fee = vol * feeRateRef.current.takerFee; // Market order = taker
+        const orderId: string = result?.orderId ?? result?.id ?? '';
+
+        s.addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `[${market.toUpperCase()}] ${normalizedSym}: orderId=${orderId || 'N/A'} — fill doğrulanıyor…`,
+        });
+
+        // Wait briefly for market order to settle
+        await new Promise((r) => setTimeout(r, 800));
+
+        // Try inline fill first, then query API
+        let fill = extractInlineFill(result);
+        if (!fill && orderId) {
+          const st = await fetchOrderStatus(orderId, s.symbol, market);
+          if (st) fill = { filledQty: st.filledQty, avgFillPrice: st.avgFillPrice, status: st.status };
+        }
+
+        if (!fill) {
+          consecutiveUnverifiedRef.current += 1;
+          s.addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `[${market.toUpperCase()}] ${normalizedSym}: Fill doğrulanamadı (orderId=${orderId || 'N/A'}). Hacim sayılmadı. (${consecutiveUnverifiedRef.current}/${MAX_CONSECUTIVE_UNVERIFIED})`,
+          });
+          if (consecutiveUnverifiedRef.current >= MAX_CONSECUTIVE_UNVERIFIED) {
+            runningRef.current = false;
+            s.setField('status', 'STOPPED');
+            s.addLog({ time: new Date().toLocaleTimeString(), message: `${MAX_CONSECUTIVE_UNVERIFIED} ardışık doğrulanamaz işlem — bot durduruldu.` });
+          }
+          return;
+        }
+
+        if (fill.filledQty <= 0) {
+          consecutiveUnverifiedRef.current += 1;
+          s.addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `[${market.toUpperCase()}] ${normalizedSym}: ${sideLabel} orderId=${orderId || 'N/A'} fill yok — status=${fill.status}. Hacim sayılmadı. (${consecutiveUnverifiedRef.current}/${MAX_CONSECUTIVE_UNVERIFIED})`,
+          });
+          if (consecutiveUnverifiedRef.current >= MAX_CONSECUTIVE_UNVERIFIED) {
+            runningRef.current = false;
+            s.setField('status', 'STOPPED');
+            s.addLog({ time: new Date().toLocaleTimeString(), message: `${MAX_CONSECUTIVE_UNVERIFIED} ardışık fill'siz işlem — bot durduruldu.` });
+          }
+          return;
+        }
+
+        // Confirmed fill
+        consecutiveUnverifiedRef.current = 0;
+
+        const vol = fill.filledQty * fill.avgFillPrice;
+        const fee = vol * feeRateRef.current.takerFee;
 
         const freshState = useBotStore.getState().volumeBot;
         const prevCount = freshState.tradesCount;
@@ -183,18 +344,20 @@ export const VolumeBot: React.FC = () => {
 
         freshState.addLog({
           time: new Date().toLocaleTimeString(),
-          symbol: s.symbol,
+          symbol: normalizedSym,
           side: sideLabel,
-          amount: quantity,
-          price: fillPrice,
+          amount: fill.filledQty,
+          price: fill.avgFillPrice,
           fee,
-          orderId: result?.orderId ?? result?.id,
+          orderId,
+          message: `[${market.toUpperCase()}] Fill doğrulandı: ${sideLabel} ${fill.filledQty.toFixed(8)}@${fill.avgFillPrice.toFixed(4)} → hacim $${vol.toFixed(4)} status=${fill.status}`,
         });
       }
     } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Unknown error';
-      s.addLog({ time: new Date().toLocaleTimeString(), message: `HATA: ${msg}` });
-      toast.error(`Volume Bot: ${msg}`);
+      const category = classifyError(err);
+      const { volumeBot: s2 } = useBotStore.getState();
+      s2.addLog({ time: new Date().toLocaleTimeString(), message: `[${market.toUpperCase()}] HATA: ${category}` });
+      toast.error(`Volume Bot: ${category}`);
     }
   }, []);
 
@@ -215,6 +378,7 @@ export const VolumeBot: React.FC = () => {
   const doStart = useCallback(() => {
     if (runningRef.current) return;
     runningRef.current = true;
+    consecutiveUnverifiedRef.current = 0;
     state.resetStats();
     state.setField('status', 'RUNNING');
 
