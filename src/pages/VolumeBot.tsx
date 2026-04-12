@@ -453,8 +453,8 @@ export const VolumeBot: React.FC = () => {
           type="text"
           value={state.symbol}
           onChange={(e) => state.setField('symbol', e.target.value)}
-          placeholder={state.isSpot ? 'BTC-USDC' : 'BTC-USD'}
-          hint={state.isSpot ? 'Spot format: BTC-USDC' : 'Perps format: BTC-USD'}
+          placeholder={state.isSpot ? 'BTC_USDC' : 'BTC-USD'}
+          hint={state.isSpot ? 'Spot format: BTC_USDC' : 'Perps format: BTC-USD'}
         />
 
         <div className="grid grid-cols-2 gap-3">

@@ -47,7 +47,7 @@ interface BotStoreState {
 
 export const useBotStore = create<BotStoreState>((set) => ({
   volumeBot: {
-    symbol: 'BTC-USDC',
+    symbol: 'BTC_USDC',
     minAmount: '0.001',
     maxAmount: '0.01',
     intervalSec: '10',
@@ -88,7 +88,7 @@ export const useBotStore = create<BotStoreState>((set) => ({
       })),
   },
   gridBot: {
-    symbol: 'BTC-USDC',
+    symbol: 'BTC_USDC',
     lowerPrice: '60000',
     upperPrice: '70000',
     gridCount: '10',

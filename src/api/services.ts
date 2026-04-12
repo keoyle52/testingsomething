@@ -34,21 +34,26 @@ function generateClOrdID(): string {
 
 /**
  * Normalize a trading symbol for the target market.
- * SoDEX perps API uses "BTC-USD" format, spot API uses "BTC-USDC" format.
- * This helper converts between the two so users don't get 404 errors
- * when using spot-style symbols on perps endpoints or vice versa.
+ * SoDEX perps API uses "BTC-USD" format (hyphen separator).
+ * SoDEX spot  API uses "BTC_USDC" format (underscore separator).
+ * This helper converts between the two so users don't get "invalid symbol"
+ * errors when using one format on the wrong endpoint.
  */
 export function normalizeSymbol(symbol: string, market: 'spot' | 'perps'): string {
   if (!symbol) return symbol;
-  if (market === 'perps') {
-    // Convert spot-style "-USDC" to perps-style "-USD"
-    return symbol.replace(/-USDC$/, '-USD');
+  if (market === 'spot') {
+    // Convert to underscore format: BTC-USDC → BTC_USDC, BTC-USD → BTC_USDC
+    let sym = symbol.replace(/-/g, '_');
+    // If it ends with _USD but not _USDC (perps-style), append C
+    if (sym.endsWith('_USD') && !sym.endsWith('_USDC')) {
+      sym += 'C';
+    }
+    return sym;
   }
-  // Convert perps-style "-USD" to spot-style "-USDC" (only if it ends with -USD, not -USDC)
-  if (symbol.endsWith('-USD') && !symbol.endsWith('-USDC')) {
-    return symbol + 'C';
-  }
-  return symbol;
+  // Perps: convert to hyphen format BTC_USDC → BTC-USD
+  const sym = symbol.replace(/_/g, '-');
+  // Convert spot-style "-USDC" to perps-style "-USD"
+  return sym.replace(/-USDC$/, '-USD');
 }
 
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
@@ -120,6 +125,39 @@ export async function fetchPerpsAccountState(): Promise<{ accountID: number | st
   const accountID = data.accountID ?? data.accountId ?? data.account_id ?? data.id;
   if (accountID == null) throw new Error('fetchPerpsAccountState: accountID not found in response');
   return { ...data, accountID };
+}
+
+/**
+ * Fetch the spot account state for the current wallet.
+ * Returns an object containing at minimum `accountID`.
+ */
+export async function fetchSpotAccountState(): Promise<{ accountID: number | string; [key: string]: any }> {
+  const address = getEvmAddress();
+  if (!address) throw new Error('No wallet configured');
+  const res: any = await withRetry(() => spotClient.get(`/accounts/${address}`));
+  const data = res?.data ?? res ?? {};
+  assertNoBodyError(data);
+  const accountID = data.accountID ?? data.accountId ?? data.account_id ?? data.id;
+  if (accountID == null) throw new Error('fetchSpotAccountState: accountID not found in response');
+  return { ...data, accountID };
+}
+
+/**
+ * Look up the numeric symbolID for a given symbol name on the spot market.
+ * Returns null if the symbol cannot be found.
+ */
+export async function fetchSpotSymbolID(symbol: string): Promise<number | null> {
+  try {
+    const symbols = await fetchSymbols('spot');
+    const list: any[] = Array.isArray(symbols) ? symbols : (symbols?.symbols ?? symbols?.data ?? []);
+    const normalised = normalizeSymbol(symbol, 'spot');
+    const entry = list.find(
+      (s: any) => s.symbol === normalised || s.name === normalised || s.ticker === normalised,
+    );
+    return entry?.symbolID ?? entry?.id ?? entry?.symbolId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchTickers(market: 'spot' | 'perps' = 'perps') {
@@ -221,11 +259,31 @@ export interface PlaceOrderParams {
 
 /**
  * Place a **spot** order.
- * Spot payload is the flat `{ symbol, side, type, quantity, ... }` shape.
+ * Spot payload is the flat `{ accountID, symbolID, clOrdID, side, type, quantity, ... }` shape.
+ * Both `accountID` and `symbolID` are resolved from the exchange before posting.
  */
 async function placeSpotOrder(params: PlaceOrderParams): Promise<any> {
-  const normalizedParams = { ...params, symbol: normalizeSymbol(params.symbol, 'spot') };
-  const res: any = await withRetry(() => spotClient.post('/trade/orders', normalizedParams));
+  const [accountState, symbolID] = await Promise.all([
+    fetchSpotAccountState(),
+    fetchSpotSymbolID(params.symbol),
+  ]);
+
+  if (symbolID == null) {
+    throw new Error(`placeSpotOrder: symbolID not found for symbol "${params.symbol}"`);
+  }
+
+  const payload: Record<string, any> = {
+    accountID: accountState.accountID,
+    symbolID,
+    clOrdID: generateClOrdID(),
+    side: params.side,
+    type: params.type,
+    quantity: params.quantity,
+  };
+  if (params.price !== undefined) payload.price = params.price;
+  if (params.timeInForce !== undefined) payload.timeInForce = params.timeInForce;
+
+  const res: any = await withRetry(() => spotClient.post('/trade/orders', payload));
   const data = res?.data ?? res ?? {};
   assertNoBodyError(data);
   return data;
