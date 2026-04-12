@@ -238,3 +238,74 @@ export async function fetchAccountOrders(
   const res: any = await withRetry(() => client.get(`/accounts/${addr}/orders`));
   return res?.data ?? res ?? [];
 }
+
+// ---------- Order Status & Fill Verification ----------
+
+export interface OrderStatusResult {
+  orderId: string;
+  status: string;
+  filledQty: number;
+  avgFillPrice: number;
+  filledValue: number;
+}
+
+/**
+ * Fetch the current status and fill information for a specific order.
+ * The `symbol` parameter is forwarded as a query param for exchanges that
+ * shard order storage by market; it is harmless for exchanges where `orderId`
+ * is globally unique.
+ * Returns null if the endpoint is unavailable or the response has an unexpected
+ * format — callers must treat null as "unverifiable" and must NOT count volume.
+ */
+export async function fetchOrderStatus(
+  orderId: string,
+  symbol: string,
+  market: 'spot' | 'perps' = 'perps',
+): Promise<OrderStatusResult | null> {
+  const address = getEvmAddress();
+  if (!address) return null;
+  const client = getClient(market);
+  const sym = normalizeSymbol(symbol, market);
+  try {
+    // Try the per-order endpoint first
+    const res: any = await client.get(`/accounts/${address}/orders/${orderId}`, {
+      params: { symbol: sym },
+    });
+    const data = res?.data ?? res ?? {};
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+
+    const status: string =
+      data.status ?? data.orderStatus ?? data.order_status ?? 'UNKNOWN';
+    const filledQty =
+      parseFloat(
+        data.filledQty ?? data.executedQty ?? data.filled_qty ?? data.cumQty ?? '0',
+      ) || 0;
+    const avgFillPrice =
+      parseFloat(data.avgFillPrice ?? data.avgPrice ?? data.avg_price ?? '0') || 0;
+
+    return { orderId, status, filledQty, avgFillPrice, filledValue: filledQty * avgFillPrice };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch recent fills / trades for the current account.
+ */
+export async function fetchAccountFills(
+  market: 'spot' | 'perps' = 'perps',
+  limit = 20,
+): Promise<any[]> {
+  const address = getEvmAddress();
+  if (!address) throw new Error('No wallet configured');
+  const client = getClient(market);
+  try {
+    const res: any = await client.get(`/accounts/${address}/fills`, {
+      params: { limit },
+    });
+    const list = res?.data ?? res ?? [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
