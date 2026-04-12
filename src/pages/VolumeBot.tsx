@@ -36,6 +36,11 @@ function symbolFromBase(base: string, market: 'spot' | 'perps'): string {
   return market === 'spot' ? `${base}_USDC` : `${base}-USD`;
 }
 
+function parsePositiveLimit(value: string): number | null {
+  const n = parseFloat(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 /**
  * Classify an API error into a human-readable category so the log is actionable.
  */
@@ -101,17 +106,17 @@ export const VolumeBot: React.FC = () => {
     if (!runningRef.current) return;
     const { volumeBot: s } = useBotStore.getState();
 
-    const maxVol = parseFloat(s.maxVolumeTarget);
-    if (maxVol > 0 && s.totalVolume >= maxVol) {
+    const maxVolLimit = parsePositiveLimit(s.maxVolumeTarget);
+    if (maxVolLimit !== null && s.totalVolume >= maxVolLimit) {
       runningRef.current = false;
       s.setField('status', 'STOPPED');
-      s.addLog({ time: new Date().toLocaleTimeString(), message: `Hedef hacme (${maxVol}) ulaşıldı. Bot durdu.` });
+      s.addLog({ time: new Date().toLocaleTimeString(), message: `Hedef hacme (${maxVolLimit}) ulaşıldı. Bot durdu.` });
       return;
     }
 
     // Budget guard: stop if max spend limit reached
-    const maxSpendLimit = parseFloat(s.maxSpend);
-    if (maxSpendLimit > 0 && s.totalSpent >= maxSpendLimit) {
+    const maxSpendLimit = parsePositiveLimit(s.maxSpend);
+    if (maxSpendLimit !== null && s.totalSpent >= maxSpendLimit) {
       runningRef.current = false;
       s.setField('status', 'STOPPED');
       s.addLog({ time: new Date().toLocaleTimeString(), message: `Max harcama limiti ($${maxSpendLimit.toFixed(2)}) aşıldı. Bot durdu.` });
@@ -160,7 +165,7 @@ export const VolumeBot: React.FC = () => {
       // Round-trip strategy sends both BUY and SELL, so reserve half budget per side.
       let maxQtyPerSide = effectiveBudget / (midPrice * ROUND_TRIP_SIDES);
 
-      if (maxSpendLimit > 0) {
+      if (maxSpendLimit !== null) {
         const spendRemaining = maxSpendLimit - s.totalSpent;
         if (spendRemaining <= 0) {
           runningRef.current = false;
@@ -265,16 +270,19 @@ export const VolumeBot: React.FC = () => {
         const filledQtySell = sellFill?.filledQty ?? 0;
         const filledSides = (filledQtyBuy > 0 ? 1 : 0) + (filledQtySell > 0 ? 1 : 0);
         const filledQtyAvg = filledSides > 0 ? (filledQtyBuy + filledQtySell) / filledSides : 0;
-        const fee = filledQtyAvg * midPrice * (feeRateRef.current.makerFee + feeRateRef.current.takerFee);
+        const fee = (buyVol * feeRateRef.current.takerFee) + (sellVol * feeRateRef.current.takerFee);
 
         const freshState = useBotStore.getState().volumeBot;
         const prevCount = freshState.tradesCount;
         const prevSpread = freshState.avgSpread;
+        const nextTotalVolume = freshState.totalVolume + totalFillVol;
+        const nextTotalFee = freshState.totalFee + fee;
+        const nextTotalSpent = freshState.totalSpent + fee;
 
-        freshState.setField('totalVolume', freshState.totalVolume + totalFillVol);
+        freshState.setField('totalVolume', nextTotalVolume);
         freshState.setField('tradesCount', prevCount + filledSides);
-        freshState.setField('totalFee', freshState.totalFee + fee);
-        freshState.setField('totalSpent', freshState.totalSpent + fee);
+        freshState.setField('totalFee', nextTotalFee);
+        freshState.setField('totalSpent', nextTotalSpent);
         freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / (prevCount + filledSides));
 
         freshState.addLog({
@@ -287,6 +295,19 @@ export const VolumeBot: React.FC = () => {
           orderId: `${buyOrderId || 'N/A'} / ${sellOrderId || 'N/A'}`,
           message: `[${market.toUpperCase()}] Fill doğrulandı: BUY ${filledQtyBuy.toFixed(8)}@${buyFill?.avgFillPrice?.toFixed(4) ?? midPrice} SELL ${filledQtySell.toFixed(8)}@${sellFill?.avgFillPrice?.toFixed(4) ?? midPrice} → hacim $${totalFillVol.toFixed(4)}`,
         });
+
+        if (maxVolLimit !== null && nextTotalVolume >= maxVolLimit) {
+          runningRef.current = false;
+          freshState.setField('status', 'STOPPED');
+          freshState.addLog({ time: new Date().toLocaleTimeString(), message: `Hedef hacme (${maxVolLimit}) ulaşıldı. Bot durdu.` });
+          return;
+        }
+        if (maxSpendLimit !== null && nextTotalSpent >= maxSpendLimit) {
+          runningRef.current = false;
+          freshState.setField('status', 'STOPPED');
+          freshState.addLog({ time: new Date().toLocaleTimeString(), message: `Max harcama limiti ($${maxSpendLimit.toFixed(2)}) doldu. Bot durdu.` });
+          return;
+        }
       } else {
         // Classic mode: single market order
         const side: 1 | 2 = Math.random() > 0.5 ? 1 : 2;
@@ -357,11 +378,14 @@ export const VolumeBot: React.FC = () => {
         const freshState = useBotStore.getState().volumeBot;
         const prevCount = freshState.tradesCount;
         const prevSpread = freshState.avgSpread;
+        const nextTotalVolume = freshState.totalVolume + vol;
+        const nextTotalFee = freshState.totalFee + fee;
+        const nextTotalSpent = freshState.totalSpent + fee;
 
-        freshState.setField('totalVolume', freshState.totalVolume + vol);
+        freshState.setField('totalVolume', nextTotalVolume);
         freshState.setField('tradesCount', prevCount + 1);
-        freshState.setField('totalFee', freshState.totalFee + fee);
-        freshState.setField('totalSpent', freshState.totalSpent + fee);
+        freshState.setField('totalFee', nextTotalFee);
+        freshState.setField('totalSpent', nextTotalSpent);
         freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / (prevCount + 1));
 
         freshState.addLog({
@@ -374,6 +398,19 @@ export const VolumeBot: React.FC = () => {
           orderId,
           message: `[${market.toUpperCase()}] Fill doğrulandı: ${sideLabel} ${fill.filledQty.toFixed(8)}@${fill.avgFillPrice.toFixed(4)} → hacim $${vol.toFixed(4)} status=${fill.status}`,
         });
+
+        if (maxVolLimit !== null && nextTotalVolume >= maxVolLimit) {
+          runningRef.current = false;
+          freshState.setField('status', 'STOPPED');
+          freshState.addLog({ time: new Date().toLocaleTimeString(), message: `Hedef hacme (${maxVolLimit}) ulaşıldı. Bot durdu.` });
+          return;
+        }
+        if (maxSpendLimit !== null && nextTotalSpent >= maxSpendLimit) {
+          runningRef.current = false;
+          freshState.setField('status', 'STOPPED');
+          freshState.addLog({ time: new Date().toLocaleTimeString(), message: `Max harcama limiti ($${maxSpendLimit.toFixed(2)}) doldu. Bot durdu.` });
+          return;
+        }
       }
     } catch (err: unknown) {
       const category = classifyError(err);
@@ -464,6 +501,11 @@ export const VolumeBot: React.FC = () => {
       }
     };
   }, []);
+
+  const spendLimitValue = parsePositiveLimit(state.maxSpend);
+  const volumeTargetValue = parsePositiveLimit(state.maxVolumeTarget);
+  const spendUsageRatio = spendLimitValue !== null ? Math.min((state.totalSpent / spendLimitValue) * 100, 100) : 0;
+  const volumeProgressRatio = volumeTargetValue !== null ? Math.min((state.totalVolume / volumeTargetValue) * 100, 100) : 0;
 
   return (
     <div className="flex h-[calc(100vh-52px)]">
@@ -596,51 +638,51 @@ export const VolumeBot: React.FC = () => {
             label="Harcanan Bütçe"
             value={<NumberDisplay value={state.totalSpent} prefix="$" />}
             icon={<DollarSign size={16} />}
-            trend={parseFloat(state.maxSpend) > 0 && state.totalSpent > parseFloat(state.maxSpend) * 0.8 ? 'down' : 'neutral'}
+            trend={spendLimitValue !== null && state.totalSpent > spendLimitValue * 0.8 ? 'down' : 'neutral'}
           />
           <StatCard
             label="Kalan Harcama"
-            value={<NumberDisplay value={Math.max(0, (parseFloat(state.maxSpend) || 0) - state.totalSpent)} prefix="$" />}
+            value={<NumberDisplay value={Math.max(0, (spendLimitValue ?? 0) - state.totalSpent)} prefix="$" />}
             icon={<Activity size={16} />}
-            trend={parseFloat(state.maxSpend) > 0 && state.totalSpent > parseFloat(state.maxSpend) * 0.8 ? 'down' : 'up'}
+            trend={spendLimitValue !== null && state.totalSpent > spendLimitValue * 0.8 ? 'down' : 'up'}
           />
         </div>
 
         {/* Volume Progress */}
-        {parseFloat(state.maxVolumeTarget) > 0 && (
+        {volumeTargetValue !== null && (
           <div className="glass-card p-4">
             <div className="flex justify-between text-xs mb-2">
               <span className="text-text-secondary">Hacim İlerlemesi</span>
               <span className="text-text-primary font-mono tabular-nums">
-                {((state.totalVolume / parseFloat(state.maxVolumeTarget)) * 100).toFixed(1)}%
+                {volumeProgressRatio.toFixed(1)}%
               </span>
             </div>
             <div className="h-2 bg-background rounded-full overflow-hidden">
               <div
                 className="h-full bg-gradient-to-r from-primary to-primary-soft rounded-full transition-all duration-500"
-                style={{ width: `${Math.min((state.totalVolume / parseFloat(state.maxVolumeTarget)) * 100, 100)}%` }}
+                style={{ width: `${volumeProgressRatio}%` }}
               />
             </div>
           </div>
         )}
 
         {/* Spend Limit Progress */}
-        {parseFloat(state.maxSpend) > 0 && (
+        {spendLimitValue !== null && (
           <div className="glass-card p-4">
             <div className="flex justify-between text-xs mb-2">
               <span className="text-text-secondary">Harcama Limiti</span>
-              <span className={`font-mono tabular-nums ${state.totalSpent > parseFloat(state.maxSpend) * 0.8 ? 'text-danger' : 'text-text-primary'}`}>
+              <span className={`font-mono tabular-nums ${state.totalSpent > spendLimitValue * 0.8 ? 'text-danger' : 'text-text-primary'}`}>
                 ${state.totalSpent.toFixed(2)} / ${state.maxSpend}
               </span>
             </div>
             <div className="h-2 bg-background rounded-full overflow-hidden">
               <div
                 className={`h-full rounded-full transition-all duration-500 ${
-                  state.totalSpent > parseFloat(state.maxSpend) * 0.8
+                  state.totalSpent > spendLimitValue * 0.8
                     ? 'bg-gradient-to-r from-warning to-danger'
                     : 'bg-gradient-to-r from-success to-primary'
                 }`}
-                style={{ width: `${Math.min((state.totalSpent / parseFloat(state.maxSpend)) * 100, 100)}%` }}
+                style={{ width: `${spendUsageRatio}%` }}
               />
             </div>
           </div>
