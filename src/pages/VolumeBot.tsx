@@ -1,56 +1,162 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import toast from 'react-hot-toast';
 import { useBotStore } from '../store/botStore';
+import { useSettingsStore } from '../store/settingsStore';
+import { placeOrder, fetchOrderbook } from '../api/services';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { StatusBadge } from '../components/common/StatusBadge';
+import { ConfirmModal } from '../components/common/ConfirmModal';
 
+const FEE_RATE = 0.001;
 
 export const VolumeBot: React.FC = () => {
   const { volumeBot: state } = useBotStore();
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const { confirmOrders } = useSettingsStore();
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const runningRef = useRef(false);
+  const [showConfirm, setShowConfirm] = useState(false);
 
-  const startBot = () => {
+  const getMarket = useCallback((): 'spot' | 'perps' => {
+    return state.isSpot ? 'spot' : 'perps';
+  }, [state.isSpot]);
+
+  const executeTrade = useCallback(async () => {
+    const { volumeBot: s } = useBotStore.getState();
+    if (!runningRef.current) return;
+
+    const maxVol = parseFloat(s.maxVolumeTarget);
+    if (maxVol > 0 && s.totalVolume >= maxVol) {
+      runningRef.current = false;
+      s.setField('status', 'STOPPED');
+      s.addLog({ time: new Date().toLocaleTimeString(), message: `Max volume target (${maxVol}) reached. Bot stopped.` });
+      return;
+    }
+
+    const market = s.isSpot ? 'spot' : 'perps';
+
+    try {
+      const orderbook = await fetchOrderbook(s.symbol, market, 5);
+      const bestBid = orderbook?.bids?.[0]?.[0] ?? orderbook?.bids?.[0]?.price;
+      const bestAsk = orderbook?.asks?.[0]?.[0] ?? orderbook?.asks?.[0]?.price;
+
+      if (!bestBid || !bestAsk) {
+        s.addLog({ time: new Date().toLocaleTimeString(), message: `No orderbook data for ${s.symbol}` });
+        return;
+      }
+
+      const bidPrice = parseFloat(bestBid);
+      const askPrice = parseFloat(bestAsk);
+      const midPrice = (bidPrice + askPrice) / 2;
+      const spread = ((askPrice - bidPrice) / midPrice) * 100;
+
+      const spreadTol = parseFloat(s.spreadTolerance);
+      if (spreadTol > 0 && spread > spreadTol) {
+        s.addLog({ time: new Date().toLocaleTimeString(), message: `Spread too wide (${spread.toFixed(2)}% > ${spreadTol}%). Skipping.` });
+        return;
+      }
+
+      const min = parseFloat(s.minAmount);
+      const max = parseFloat(s.maxAmount);
+      const quantity = min + Math.random() * (max - min);
+      const side: 1 | 2 = Math.random() > 0.5 ? 1 : 2;
+      const sideLabel = side === 1 ? 'BUY' : 'SELL';
+      const fillPrice = side === 1 ? askPrice : bidPrice;
+
+      const result = await placeOrder(
+        { symbol: s.symbol, side, type: 2, quantity: quantity.toFixed(8) },
+        market,
+      );
+
+      const vol = quantity * fillPrice;
+      const fee = vol * FEE_RATE;
+
+      const freshState = useBotStore.getState().volumeBot;
+      freshState.setField('totalVolume', freshState.totalVolume + vol);
+      freshState.setField('tradesCount', freshState.tradesCount + 1);
+      freshState.setField('totalFee', freshState.totalFee + fee);
+
+      const prevSpread = freshState.avgSpread;
+      const count = freshState.tradesCount;
+      freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / count);
+
+      freshState.addLog({
+        time: new Date().toLocaleTimeString(),
+        symbol: s.symbol,
+        side: sideLabel,
+        amount: quantity,
+        price: fillPrice,
+        fee,
+        orderId: result?.orderId ?? result?.id,
+      });
+    } catch (err: any) {
+      const msg = err?.response?.data?.message ?? err?.message ?? 'Unknown error';
+      s.addLog({ time: new Date().toLocaleTimeString(), message: `ERROR: ${msg}` });
+      toast.error(`Volume Bot: ${msg}`);
+    }
+  }, []);
+
+  const scheduleNext = useCallback(() => {
+    if (!runningRef.current) return;
+    const { volumeBot: s } = useBotStore.getState();
+    const interval = Math.max(1, parseInt(s.intervalSec) || 10) * 1000;
+    timerRef.current = setTimeout(async () => {
+      await executeTrade();
+      scheduleNext();
+    }, interval);
+  }, [executeTrade]);
+
+  const doStart = useCallback(() => {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    state.resetStats();
     state.setField('status', 'RUNNING');
     state.addLog({ time: new Date().toLocaleTimeString(), message: 'Bot started' });
-    
-    // Timer mock for actual logic execution
-    timerRef.current = setInterval(async () => {
-      // Simulate Bot execution
-      try {
-        const simVol = Math.random() * (parseFloat(state.maxAmount) - parseFloat(state.minAmount)) + parseFloat(state.minAmount);
-        
-        // This is a simulated log since actual SODEX API interactions would require valid keys
-        state.addLog({
-          time: new Date().toLocaleTimeString(),
-          symbol: state.symbol,
-          side: Math.random() > 0.5 ? 'BUY' : 'SELL',
-          amount: simVol,
-          price: 65000 + Math.random() * 100,
-          fee: simVol * 0.001
-        });
-        
-        state.setField('totalVolume', state.totalVolume + simVol * 65000);
-        state.setField('tradesCount', state.tradesCount + 1);
-        state.setField('totalFee', state.totalFee + simVol * 0.001);
-      } catch (err) {
-        console.error(err);
-      }
-    }, parseInt(state.intervalSec) * 1000);
-  };
 
-  const stopBot = () => {
-    if (timerRef.current) clearInterval(timerRef.current);
+    // Run first trade immediately, then schedule subsequent ones
+    (async () => {
+      await executeTrade();
+      scheduleNext();
+    })();
+  }, [state, executeTrade, scheduleNext]);
+
+  const startBot = useCallback(() => {
+    if (confirmOrders) {
+      setShowConfirm(true);
+    } else {
+      doStart();
+    }
+  }, [confirmOrders, doStart]);
+
+  const stopBot = useCallback(() => {
+    runningRef.current = false;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     state.setField('status', 'STOPPED');
     state.addLog({ time: new Date().toLocaleTimeString(), message: 'Bot stopped' });
-  };
+  }, [state]);
 
   useEffect(() => {
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      runningRef.current = false;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
     };
   }, []);
 
   return (
     <div className="flex h-[calc(100vh-48px)]">
+      <ConfirmModal
+        isOpen={showConfirm}
+        title="Volume Bot'u Başlat"
+        message={`${state.symbol} için Volume Bot başlatılacak.\nPiyasa: ${state.isSpot ? 'Spot' : 'Perps'}\nMiktar aralığı: ${state.minAmount} – ${state.maxAmount}\nAralık: ${state.intervalSec}s`}
+        onConfirm={doStart}
+        onCancel={() => setShowConfirm(false)}
+      />
+
       {/* Settings Panel */}
       <div className="w-80 border-r border-border bg-surface p-4 flex flex-col gap-4 overflow-y-auto">
         <h2 className="font-semibold mb-2">Volume Bot Ayarları</h2>
