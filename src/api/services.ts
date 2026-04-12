@@ -116,6 +116,10 @@ export interface SymbolTradingRules {
   quantityPrecision: number;
   /** Minimum quantity increment for orders on the current symbol. */
   stepSize: number;
+  /** Decimal places allowed for price on the current symbol. */
+  pricePrecision: number;
+  /** Minimum price increment for orders on the current symbol. */
+  tickSize: number;
 }
 
 /** Fallback price precision (decimal places) when symbol metadata is unavailable. */
@@ -176,8 +180,8 @@ export async function fetchSymbolTradingRules(
   market: 'spot' | 'perps',
 ): Promise<SymbolTradingRules> {
   const entry = await fetchSymbolEntry(symbol, market);
-  const { quantityPrecision, stepSize } = extractPrecision(entry);
-  return { quantityPrecision, stepSize };
+  const { quantityPrecision, stepSize, pricePrecision, tickSize } = extractPrecision(entry);
+  return { quantityPrecision, stepSize, pricePrecision, tickSize };
 }
 
 /**
@@ -666,11 +670,20 @@ export async function fetchOrderStatus(
     const trades: any[] = res?.data ?? res ?? [];
     if (!Array.isArray(trades)) return null;
 
-    if (trades.length === 0) {
-      // No fills found. For IOC/GTX orders this typically means the order expired
-      // unfilled. It may also mean the order is still in flight (unlikely after the
-      // FILL_VERIFICATION_DELAY_MS wait). Using EXPIRED is a safe assumption here;
-      // callers that see filledQty === 0 will not count volume.
+    // Filter to only trades that belong to this specific order.
+    // The endpoint may return all recent trades when orderID filtering is not
+    // supported server-side; without this filter every status check would
+    // aggregate unrelated fills and inflate the volume/fee metrics.
+    const matchingTrades = trades.filter((t: any) => {
+      const tradeOrderId = t.orderID ?? t.orderId ?? t.order_id;
+      if (tradeOrderId == null) return false; // exclude trades with no ID — cannot verify ownership
+      const tradeIdStr = String(tradeOrderId);
+      return tradeIdStr === orderId || (!isNaN(numericOrderId) && Number(tradeOrderId) === numericOrderId);
+    });
+
+    if (matchingTrades.length === 0) {
+      // No fills found for this order. For IOC/GTX orders this typically means
+      // the order expired unfilled.
       return { orderId, status: 'EXPIRED', filledQty: 0, avgFillPrice: 0, filledValue: 0, totalFee: 0 };
     }
 
@@ -678,7 +691,7 @@ export async function fetchOrderStatus(
     let totalQty = 0;
     let totalValue = 0;
     let totalFee = 0;
-    for (const t of trades) {
+    for (const t of matchingTrades) {
       const qty = parseFloat(t.quantity ?? '0') || 0;
       const price = parseFloat(t.price ?? '0') || 0;
       const fee = parseFloat(t.fee ?? t.commission ?? '0') || 0;

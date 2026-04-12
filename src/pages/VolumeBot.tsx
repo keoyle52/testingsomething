@@ -11,6 +11,8 @@ import {
   fetchOrderStatus,
   fetchSymbolTradingRules,
   updatePerpsLeverage,
+  cancelOrder,
+  fetchSymbols,
 } from '../api/services';
 import type { FeeRateInfo } from '../api/services';
 import { NumberDisplay } from '../components/common/NumberDisplay';
@@ -102,6 +104,41 @@ export const VolumeBot: React.FC = () => {
   const feeRateRef = useRef<FeeRateInfo>({ makerFee: 0.00012, takerFee: 0.0004 });
   const consecutiveUnverifiedRef = useRef(0);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [pairOptions, setPairOptions] = useState<{ value: string; label: string }[]>(
+    PAIR_BASE_OPTIONS.map((base) => ({
+      value: symbolFromBase(base, state.isSpot ? 'spot' : 'perps'),
+      label: `${base}/${state.isSpot ? 'USDC' : 'USD'}`,
+    })),
+  );
+
+  // Load available trading pairs from the exchange whenever the market type changes.
+  // `state.symbol` and `state.setField` are intentionally read via the store snapshot
+  // inside the callback so they are always fresh without being listed as dependencies
+  // (which would cause the effect to re-run on every symbol change).
+  useEffect(() => {
+    const market = state.isSpot ? 'spot' : 'perps';
+    fetchSymbols(market)
+      .then((symbols) => {
+        const list: any[] = Array.isArray(symbols) ? symbols : (symbols?.symbols ?? symbols?.data ?? []);
+        const opts = list
+          .filter((s: any) => s.symbol || s.name || s.ticker)
+          .map((s: any) => {
+            const sym = s.symbol ?? s.name ?? s.ticker;
+            return { value: sym, label: sym };
+          });
+        if (opts.length > 0) {
+          setPairOptions(opts);
+          // If the currently selected symbol is not available on this market, switch to the first available pair
+          const currentSymbol = useBotStore.getState().volumeBot.symbol;
+          if (!opts.find((o) => o.value === currentSymbol)) {
+            useBotStore.getState().volumeBot.setField('symbol', opts[0].value);
+          }
+        }
+      })
+      .catch(() => {
+        // Keep the current (or fallback hardcoded) options on failure
+      });
+  }, [state.isSpot]);
 
   const executeTrade = useCallback(async () => {
     if (!runningRef.current) return;
@@ -163,6 +200,7 @@ export const VolumeBot: React.FC = () => {
       const quantityPrecision = Math.max(0, Math.min(MAX_QUANTITY_PRECISION, rules.quantityPrecision || 8));
       const stepSize = rules.stepSize > 0 ? rules.stepSize : Number(`1e-${quantityPrecision}`);
       const quantityStepEpsilon = Math.max(stepSize * 1e-9, Number.EPSILON);
+      const pricePrecision = Math.max(0, Math.min(8, rules.pricePrecision || 2));
       // Round-trip strategy sends both BUY and SELL, so reserve half budget per side.
       let maxQtyPerSide = effectiveBudget / (midPrice * ROUND_TRIP_SIDES);
 
@@ -187,22 +225,25 @@ export const VolumeBot: React.FC = () => {
       }
 
       if (hasBudget) {
-        // Budget mode: place BUY and SELL LIMIT IOC at touch prices for better fill probability
-        const buyLimitPrice = askPrice.toString();
-        const sellLimitPrice = bidPrice.toString();
+        // Zero-spread strategy: place BUY GTC at midPrice (rests in book), then SELL IOC at
+        // midPrice which crosses the resting BUY when self-trade is allowed by the exchange.
+        // This eliminates spread cost — only fees are paid. If self-trade is blocked (STP),
+        // the SELL IOC expires unfilled and the resting BUY GTC is cancelled to keep the
+        // account position neutral.
+        const midPriceStr = midPrice.toFixed(pricePrecision);
         const qty = quantity.toFixed(quantityPrecision);
 
         s.addLog({
           time: new Date().toLocaleTimeString(),
-          message: `[${market.toUpperCase()}] ${normalizedSym}: BUY IOC @ ${askPrice} + SELL IOC @ ${bidPrice} qty=${qty} — emir gönderiliyor…`,
+          message: `[${market.toUpperCase()}] ${normalizedSym}: BUY GTC @ ${midPriceStr} + SELL IOC @ ${midPriceStr} qty=${qty} — emir gönderiliyor…`,
         });
 
         const buyResult = await placeOrder(
-          { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: buyLimitPrice, timeInForce: 3 },
+          { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: midPriceStr, timeInForce: 1 },
           market,
         );
         const sellResult = await placeOrder(
-          { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: sellLimitPrice, timeInForce: 3 },
+          { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: midPriceStr, timeInForce: 3 },
           market,
         );
 
@@ -214,7 +255,7 @@ export const VolumeBot: React.FC = () => {
           message: `[${market.toUpperCase()}] ${normalizedSym}: BUY orderId=${buyOrderId || 'N/A'} SELL orderId=${sellOrderId || 'N/A'} — fill doğrulanıyor…`,
         });
 
-        // Allow the exchange a moment to process IOC orders before querying status
+        // Allow the exchange a moment to process orders before querying status
         await new Promise((r) => setTimeout(r, FILL_VERIFICATION_DELAY_MS));
 
         // Resolve fill data: prefer inline response, fall back to API status query
@@ -228,6 +269,17 @@ export const VolumeBot: React.FC = () => {
         if (!sellFill && sellOrderId) {
           const st = await fetchOrderStatus(sellOrderId, s.symbol, market);
             if (st) sellFill = { filledQty: st.filledQty, avgFillPrice: st.avgFillPrice, status: st.status, totalFee: st.totalFee };
+        }
+
+        // The BUY order was placed as GTC (rests in book). If it did not fill (SELL IOC
+        // was blocked by STP or expired), cancel it now to keep the account position neutral.
+        const buyFilled = (buyFill?.filledQty ?? 0) > 0;
+        if (!buyFilled && buyOrderId) {
+          try {
+            await cancelOrder(buyOrderId, s.symbol, market);
+          } catch {
+            // Ignore cancel errors — the order may have already expired or been filled
+          }
         }
 
         // If we couldn't verify either order, increment failure counter
@@ -545,10 +597,7 @@ export const VolumeBot: React.FC = () => {
         <Select
           label="İşlem Çifti"
           value={state.symbol}
-          options={PAIR_BASE_OPTIONS.map((base) => ({
-            value: symbolFromBase(base, state.isSpot ? 'spot' : 'perps'),
-            label: `${base}/${state.isSpot ? 'USDC' : 'USD'}`,
-          }))}
+          options={pairOptions}
           onChange={(e) => state.setField('symbol', e.target.value)}
         />
 
