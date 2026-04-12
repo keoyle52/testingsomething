@@ -3,6 +3,33 @@ import { spotClient } from './spotClient';
 import { useSettingsStore } from '../store/settingsStore';
 import { ethers } from 'ethers';
 
+// ---------- internal helpers ----------
+
+/**
+ * Throw if the exchange returned a body-level error even though HTTP was 200.
+ * SoDEX perps API returns `{ code: -1, error: "..." }` on bad requests.
+ */
+function assertNoBodyError(data: any): void {
+  if (data && typeof data === 'object' && 'code' in data && data.code !== 0) {
+    throw new Error(data.error ?? data.message ?? `API error code ${data.code}`);
+  }
+}
+
+/** Monotonically increasing counter suffix used by generateClOrdID. */
+let _clOrdSeq = 0;
+
+/**
+ * Generate a unique client order ID that satisfies SoDEX constraints:
+ * ≤ 36 characters, characters limited to [0-9a-zA-Z_-].
+ * Uses a per-session sequence counter to prevent collisions even when
+ * multiple orders are created within the same millisecond.
+ */
+function generateClOrdID(): string {
+  const seq = (++_clOrdSeq).toString(36).padStart(4, '0');
+  const ts = Date.now().toString(36);
+  return `${ts}-${seq}`.slice(0, 36);
+}
+
 // ---------- helpers ----------
 
 /**
@@ -60,6 +87,39 @@ export async function fetchSymbols(market: 'spot' | 'perps' = 'perps') {
   const client = getClient(market);
   const res: any = await withRetry(() => client.get('/markets/symbols'));
   return res?.data ?? res ?? [];
+}
+
+/**
+ * Look up the numeric symbolID for a given symbol name on the perps market.
+ * Returns null if the symbol cannot be found.
+ */
+export async function fetchPerpsSymbolID(symbol: string): Promise<number | null> {
+  try {
+    const symbols = await fetchSymbols('perps');
+    const list: any[] = Array.isArray(symbols) ? symbols : (symbols?.symbols ?? symbols?.data ?? []);
+    const normalised = normalizeSymbol(symbol, 'perps');
+    const entry = list.find(
+      (s: any) => s.symbol === normalised || s.name === normalised || s.ticker === normalised,
+    );
+    return entry?.symbolID ?? entry?.id ?? entry?.symbolId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch the perps account state for the current wallet.
+ * Returns an object containing at minimum `accountID`.
+ */
+export async function fetchPerpsAccountState(): Promise<{ accountID: number | string; [key: string]: any }> {
+  const address = getEvmAddress();
+  if (!address) throw new Error('No wallet configured');
+  const res: any = await withRetry(() => perpsClient.get(`/accounts/${address}`));
+  const data = res?.data ?? res ?? {};
+  assertNoBodyError(data);
+  const accountID = data.accountID ?? data.accountId ?? data.account_id ?? data.id;
+  if (accountID == null) throw new Error('fetchPerpsAccountState: accountID not found in response');
+  return { ...data, accountID };
 }
 
 export async function fetchTickers(market: 'spot' | 'perps' = 'perps') {
@@ -159,11 +219,59 @@ export interface PlaceOrderParams {
   timeInForce?: 1 | 3 | 4; // 1=GTC, 3=IOC, 4=GTX  (FOK not supported by SoDEX)
 }
 
+/**
+ * Place a **spot** order.
+ * Spot payload is the flat `{ symbol, side, type, quantity, ... }` shape.
+ */
+async function placeSpotOrder(params: PlaceOrderParams): Promise<any> {
+  const normalizedParams = { ...params, symbol: normalizeSymbol(params.symbol, 'spot') };
+  const res: any = await withRetry(() => spotClient.post('/trade/orders', normalizedParams));
+  const data = res?.data ?? res ?? {};
+  assertNoBodyError(data);
+  return data;
+}
+
+/**
+ * Place a **perps** order.
+ * Perps payload must be `{ accountID, symbolID, orders: [...] }`.
+ * Derives `accountID` and `symbolID` from the exchange before posting.
+ */
+async function placePerpsOrder(params: PlaceOrderParams): Promise<any> {
+  const [accountState, symbolID] = await Promise.all([
+    fetchPerpsAccountState(),
+    fetchPerpsSymbolID(params.symbol),
+  ]);
+
+  if (symbolID == null) {
+    throw new Error(`placePerpsOrder: symbolID not found for symbol "${params.symbol}"`);
+  }
+
+  const order: Record<string, any> = {
+    clOrdID: generateClOrdID(),
+    side: params.side,
+    type: params.type,
+    quantity: params.quantity,
+  };
+  if (params.price !== undefined) order.price = params.price;
+  if (params.timeInForce !== undefined) order.timeInForce = params.timeInForce;
+
+  const payload = {
+    accountID: accountState.accountID,
+    symbolID,
+    orders: [order],
+  };
+
+  const res: any = await withRetry(() => perpsClient.post('/trade/orders', payload));
+  const data = res?.data ?? res ?? {};
+  assertNoBodyError(data);
+
+  // Normalise perps response: unwrap the first order result if orders array is returned
+  const firstOrder = Array.isArray(data?.orders) ? data.orders[0] : data;
+  return firstOrder ?? data;
+}
+
 export async function placeOrder(params: PlaceOrderParams, market: 'spot' | 'perps' = 'perps') {
-  const client = getClient(market);
-  const normalizedParams = { ...params, symbol: normalizeSymbol(params.symbol, market) };
-  const res: any = await withRetry(() => client.post('/trade/orders', normalizedParams));
-  return res?.data ?? res ?? {};
+  return market === 'perps' ? placePerpsOrder(params) : placeSpotOrder(params);
 }
 
 export async function cancelOrder(orderId: string, symbol: string, market: 'spot' | 'perps' = 'perps') {

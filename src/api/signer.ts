@@ -31,6 +31,26 @@ export function getMonotonicNonce(): string {
   return _lastNonce.toString();
 }
 
+/**
+ * Deterministic JSON serialiser: recursively sorts object keys so that
+ * `{ b: 1, a: 2 }` and `{ a: 2, b: 1 }` produce the same string and
+ * therefore the same keccak256 hash. Arrays preserve their element order
+ * but any objects within them are also key-sorted recursively.
+ */
+export function stableStringify(value: unknown): string {
+  if (value === null || value === undefined) {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(stableStringify).join(',') + ']';
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as object).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify((value as Record<string, unknown>)[k])).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+
 export async function signPayload(
   payload: any,
   privateKey: string,
@@ -40,7 +60,7 @@ export async function signPayload(
   const wallet = new ethers.Wallet(privateKey);
   const nonce = getMonotonicNonce();
   
-  const payloadString = JSON.stringify(payload || {});
+  const payloadString = stableStringify(payload ?? {});
   const payloadHash = ethers.keccak256(ethers.toUtf8Bytes(payloadString));
 
   const domain = getDomain(type, isTestnet);

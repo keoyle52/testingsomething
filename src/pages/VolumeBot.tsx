@@ -38,6 +38,9 @@ function classifyError(err: any): string {
   if (body.includes('invalid symbol') || body.includes('unknown symbol') || status === 404) {
     return 'INVALID SYMBOL — check symbol format (spot: BTC-USDC, perps: BTC-USD)';
   }
+  if (body.includes('accountid') || body.includes('symbolid') || body.includes('invalid request body')) {
+    return 'PERPS PAYLOAD ERROR — accountID or symbolID could not be resolved; check symbol and API access';
+  }
   if (status === 429 || body.includes('rate limit') || body.includes('too many')) {
     return 'RATE LIMIT — slow down interval or reduce frequency';
   }
