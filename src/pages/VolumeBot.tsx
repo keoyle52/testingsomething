@@ -3,7 +3,15 @@ import toast from 'react-hot-toast';
 import { Play, Square, BarChart3, Hash, DollarSign, Activity } from 'lucide-react';
 import { useBotStore } from '../store/botStore';
 import { useSettingsStore } from '../store/settingsStore';
-import { placeOrder, fetchOrderbook, fetchFeeRate, normalizeSymbol, fetchOrderStatus, fetchSymbolTradingRules } from '../api/services';
+import {
+  placeOrder,
+  fetchOrderbook,
+  fetchFeeRate,
+  normalizeSymbol,
+  fetchOrderStatus,
+  fetchSymbolTradingRules,
+  updatePerpsLeverage,
+} from '../api/services';
 import type { FeeRateInfo } from '../api/services';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -21,6 +29,11 @@ const MIN_FEE_RATE = 0.00000001;
 const MAX_CONSECUTIVE_UNVERIFIED = 5;
 /** How long to wait (ms) after placing an order before querying its fill status. */
 const FILL_VERIFICATION_DELAY_MS = 800;
+const PAIR_BASE_OPTIONS = ['SOSO', 'SOL', 'BTC', 'ETH'] as const;
+
+function symbolFromBase(base: string, market: 'spot' | 'perps'): string {
+  return market === 'spot' ? `${base}_USDC` : `${base}-USD`;
+}
 
 /**
  * Classify an API error into a human-readable category so the log is actionable.
@@ -167,21 +180,22 @@ export const VolumeBot: React.FC = () => {
       }
 
       if (hasBudget) {
-        // Budget mode: place BUY and SELL LIMIT IOC at mid-price
-        const limitPrice = midPrice.toString();
+        // Budget mode: place BUY and SELL LIMIT IOC at touch prices for better fill probability
+        const buyLimitPrice = askPrice.toString();
+        const sellLimitPrice = bidPrice.toString();
         const qty = quantity.toFixed(quantityPrecision);
 
         s.addLog({
           time: new Date().toLocaleTimeString(),
-          message: `[${market.toUpperCase()}] ${normalizedSym}: BUY+SELL IOC @ ${midPrice} qty=${qty} — emir gönderiliyor…`,
+          message: `[${market.toUpperCase()}] ${normalizedSym}: BUY IOC @ ${askPrice} + SELL IOC @ ${bidPrice} qty=${qty} — emir gönderiliyor…`,
         });
 
         const buyResult = await placeOrder(
-          { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: limitPrice, timeInForce: 3 },
+          { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: buyLimitPrice, timeInForce: 3 },
           market,
         );
         const sellResult = await placeOrder(
-          { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: limitPrice, timeInForce: 3 },
+          { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: sellLimitPrice, timeInForce: 3 },
           market,
         );
 
@@ -393,6 +407,22 @@ export const VolumeBot: React.FC = () => {
     const market = state.isSpot ? 'spot' : 'perps';
 
     (async () => {
+      if (market === 'perps') {
+        try {
+          await updatePerpsLeverage(state.symbol, PERPS_LEVERAGE, 2);
+          state.addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `[PERPS] ${normalizeSymbol(state.symbol, 'perps')}: Kaldıraç ${PERPS_LEVERAGE}x (CROSS) olarak ayarlandı`,
+          });
+        } catch (err: unknown) {
+          const category = classifyError(err);
+          state.addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `[PERPS] Kaldıraç güncellenemedi (${PERPS_LEVERAGE}x): ${category}`,
+          });
+        }
+      }
+
       // Fetch real fee rates from the API before trading
       const feeRate = await fetchFeeRate(market);
       feeRateRef.current = feeRate;
@@ -464,6 +494,16 @@ export const VolumeBot: React.FC = () => {
             state.setField('leverage', nextMarket === 'spot' ? '1' : String(PERPS_LEVERAGE));
             state.setField('symbol', normalizeSymbol(state.symbol, nextMarket));
           }}
+        />
+
+        <Select
+          label="İşlem Çifti"
+          value={state.symbol}
+          options={PAIR_BASE_OPTIONS.map((base) => ({
+            value: symbolFromBase(base, state.isSpot ? 'spot' : 'perps'),
+            label: `${base}/${state.isSpot ? 'USDC' : 'USD'}`,
+          }))}
+          onChange={(e) => state.setField('symbol', e.target.value)}
         />
 
         <Input

@@ -460,6 +460,35 @@ export async function placeOrder(params: PlaceOrderParams, market: 'spot' | 'per
   return market === 'perps' ? placePerpsOrder(params) : placeSpotOrder(params);
 }
 
+/**
+ * Update perps leverage/margin mode for a symbol.
+ * marginMode: 1=ISOLATED, 2=CROSS
+ */
+export async function updatePerpsLeverage(
+  symbol: string,
+  leverage: number,
+  marginMode: 1 | 2 = 2,
+): Promise<void> {
+  const [accountState, symbolID] = await Promise.all([
+    fetchPerpsAccountState(),
+    fetchPerpsSymbolID(symbol),
+  ]);
+  if (symbolID == null) {
+    throw new Error(`updatePerpsLeverage: symbolID not found for "${symbol}"`);
+  }
+
+  const payload = {
+    accountID: accountState.accountID,
+    symbolID,
+    leverage,
+    marginMode,
+  };
+
+  const res: any = await withRetry(() => perpsClient.post('/trade/leverage', payload));
+  const data = res?.data ?? res ?? {};
+  assertNoBodyError(data);
+}
+
 export async function cancelOrder(orderId: string, symbol: string, market: 'spot' | 'perps' = 'perps') {
   if (market === 'perps') {
     const [accountState, symbolID] = await Promise.all([
