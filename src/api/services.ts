@@ -6,15 +6,17 @@ import { ethers } from 'ethers';
 // ---------- helpers ----------
 
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastError: unknown;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
+      lastError = err;
       if (attempt === maxRetries - 1) throw err;
       await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 1000));
     }
   }
-  throw new Error('Unreachable');
+  throw lastError;
 }
 
 function getEvmAddress(): string {
