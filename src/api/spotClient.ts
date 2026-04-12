@@ -1,0 +1,35 @@
+import axios from 'axios';
+import { signPayload } from './signer';
+import { useSettingsStore } from '../store/settingsStore';
+
+const BASE_URL_MAINNET = 'https://mainnet-gw.sodex.dev/api/v1/spot';
+const BASE_URL_TESTNET = 'https://testnet-gw.sodex.dev/api/v1/spot';
+
+export const spotClient = axios.create();
+
+spotClient.interceptors.request.use(async (config) => {
+  const state = useSettingsStore.getState();
+  const baseURL = state.isTestnet ? BASE_URL_TESTNET : BASE_URL_MAINNET;
+  config.baseURL = baseURL;
+
+  const { apiKeyName, privateKey, isTestnet } = state;
+  
+  if (apiKeyName && privateKey) {
+    const payload = config.method?.toUpperCase() === 'GET' ? {} : config.data || {};
+    try {
+      const { signature, nonce } = await signPayload(payload, privateKey, 'spot', isTestnet);
+      config.headers['X-API-Key'] = apiKeyName;
+      config.headers['X-API-Nonce'] = nonce;
+      config.headers['X-API-Sign'] = signature;
+    } catch (error) {
+      console.error('Signing failed:', error);
+    }
+  }
+
+  return config;
+});
+
+spotClient.interceptors.response.use(
+  (response) => response.data,
+  (error) => Promise.reject(error)
+);

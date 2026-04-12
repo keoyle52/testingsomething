@@ -1,47 +1,36 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-@layer base {
-  body {
-    @apply bg-[#0a0b0d] text-[#e8eaed] m-0 p-0 overflow-hidden;
-  }
+@theme {
+  --color-background: #0a0a0a;
+  --color-surface: #111111;
+  --color-border: #1e1e1e;
+  --color-primary: #FF6B00;
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #888888;
+  --color-success: #22c55e;
+  --color-danger: #ef4444;
+  --font-sans: Inter, system-ui, sans-serif;
 }
 
-/* React Grid Layout Overrides */
-.react-grid-item.react-grid-placeholder {
-  @apply bg-[#4285f4] opacity-20 rounded shadow-[0_0_15px_#4285f4] transition duration-200;
+:root {
+  color-scheme: dark;
 }
 
-.react-resizable-handle {
-  @apply filter drop-shadow-md z-20;
+* {
+  box-sizing: border-box;
 }
 
-/* Scrollbar styling for dark theme */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent; 
-}
- 
-::-webkit-scrollbar-thumb {
-  background: #1e2028; 
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #2a2d35; 
-}
-
-/* Clean UI defaults */
-input[type="number"]::-webkit-inner-spin-button,
-input[type="number"]::-webkit-outer-spin-button {
-  -webkit-appearance: none;
+body {
   margin: 0;
+  padding: 0;
+  background-color: var(--color-background);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
 }
-input[type="number"] {
-  -moz-appearance: textfield;
-}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--color-background); }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #4a4d55; }

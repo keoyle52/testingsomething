@@ -1,33 +1,43 @@
 import React from 'react';
-import clsx from 'clsx';
-import { useSettingsStore } from '../../store/settingsStore';
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
 
-interface Props {
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+interface NumberDisplayProps {
   value: number | string;
   decimals?: number;
   prefix?: string;
   suffix?: string;
+  trend?: 'up' | 'down' | 'neutral';
   className?: string;
-  colorize?: boolean;
 }
 
-export const NumberDisplay: React.FC<Props> = ({ value, decimals, prefix, suffix, className, colorize }) => {
-  const { priceDecimals } = useSettingsStore();
+export const NumberDisplay: React.FC<NumberDisplayProps> = ({
+  value,
+  decimals = 2,
+  prefix = '',
+  suffix = '',
+  trend = 'neutral',
+  className,
+}) => {
+  const numValue = typeof value === 'string' ? parseFloat(value) : value;
+  const formatted = isNaN(numValue) ? '0.00' : numValue.toLocaleString('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
 
-  const num = typeof value === 'string' ? parseFloat(value) : value;
-  const isNaN = Number.isNaN(num);
-
-  const appliedDecimals = decimals ?? priceDecimals ?? 2;
-  const formatted = isNaN ? '-' : (prefix || '') + num.toLocaleString(undefined, { minimumFractionDigits: Math.max(0, appliedDecimals), maximumFractionDigits: Math.max(0, appliedDecimals) }) + (suffix || '');
+  const getTrendColor = () => {
+    if (trend === 'up') return 'text-success';
+    if (trend === 'down') return 'text-danger';
+    return 'text-text-primary';
+  };
 
   return (
-    <span className={clsx(
-      'tabular-nums font-mono',
-      colorize && !isNaN && num > 0 && 'text-[#00c853]', // Custom SoDEX green
-      colorize && !isNaN && num < 0 && 'text-[#f44336]', // Custom SoDEX red
-      className
-    )}>
-      {formatted}
+    <span className={cn('tabular-nums font-mono', getTrendColor(), className)}>
+      {prefix}{formatted}{suffix}
     </span>
   );
 };
