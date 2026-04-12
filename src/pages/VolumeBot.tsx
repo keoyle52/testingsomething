@@ -270,7 +270,8 @@ export const VolumeBot: React.FC = () => {
         const filledQtySell = sellFill?.filledQty ?? 0;
         const filledSides = (filledQtyBuy > 0 ? 1 : 0) + (filledQtySell > 0 ? 1 : 0);
         const filledQtyAvg = filledSides > 0 ? (filledQtyBuy + filledQtySell) / filledSides : 0;
-        const fee = (buyVol * feeRateRef.current.takerFee) + (sellVol * feeRateRef.current.takerFee);
+        const takerFeeRate = feeRateRef.current.takerFee;
+        const fee = (buyVol * takerFeeRate) + (sellVol * takerFeeRate);
 
         const freshState = useBotStore.getState().volumeBot;
         const prevCount = freshState.tradesCount;
