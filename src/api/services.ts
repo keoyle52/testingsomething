@@ -86,6 +86,15 @@ function getClient(market: 'spot' | 'perps') {
   return market === 'spot' ? spotClient : perpsClient;
 }
 
+/**
+ * Parse an order ID string to a numeric value for API parameters that require
+ * a uint64. Returns the number if the string is a valid integer, or NaN if not.
+ * Callers should fall back to using the raw string as a clOrdID when NaN.
+ */
+function parseOrderIdNumeric(orderId: string): number {
+  return Number(orderId);
+}
+
 // ---------- Market Data (Public) ----------
 
 export async function fetchSymbols(market: 'spot' | 'perps' = 'perps') {
@@ -114,30 +123,34 @@ export async function fetchPerpsSymbolID(symbol: string): Promise<number | null>
 
 /**
  * Fetch the perps account state for the current wallet.
+ * Uses /state endpoint which returns WsPerpsState (aid = Account ID).
  * Returns an object containing at minimum `accountID`.
  */
 export async function fetchPerpsAccountState(): Promise<{ accountID: number | string; [key: string]: any }> {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
-  const res: any = await withRetry(() => perpsClient.get(`/accounts/${address}`));
+  const res: any = await withRetry(() => perpsClient.get(`/accounts/${address}/state`));
   const data = res?.data ?? res ?? {};
   assertNoBodyError(data);
-  const accountID = data.accountID ?? data.accountId ?? data.account_id ?? data.id;
+  // WsPerpsState uses `aid` for account ID; also try legacy field names
+  const accountID = data.aid ?? data.accountID ?? data.accountId ?? data.account_id ?? data.id;
   if (accountID == null) throw new Error('fetchPerpsAccountState: accountID not found in response');
   return { ...data, accountID };
 }
 
 /**
  * Fetch the spot account state for the current wallet.
+ * Uses /state endpoint which returns WsSpotState (aid = Account ID).
  * Returns an object containing at minimum `accountID`.
  */
 export async function fetchSpotAccountState(): Promise<{ accountID: number | string; [key: string]: any }> {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
-  const res: any = await withRetry(() => spotClient.get(`/accounts/${address}`));
+  const res: any = await withRetry(() => spotClient.get(`/accounts/${address}/state`));
   const data = res?.data ?? res ?? {};
   assertNoBodyError(data);
-  const accountID = data.accountID ?? data.accountId ?? data.account_id ?? data.id;
+  // WsSpotState uses `aid` for account ID; also try legacy field names
+  const accountID = data.aid ?? data.accountID ?? data.accountId ?? data.account_id ?? data.id;
   if (accountID == null) throw new Error('fetchSpotAccountState: accountID not found in response');
   return { ...data, accountID };
 }
@@ -242,7 +255,7 @@ export async function fetchOpenOrders(market: 'spot' | 'perps' = 'perps') {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const client = getClient(market);
-  const res: any = await withRetry(() => client.get(`/accounts/${address}/orders/open`));
+  const res: any = await withRetry(() => client.get(`/accounts/${address}/orders`));
   return res?.data ?? res ?? [];
 }
 
@@ -259,8 +272,9 @@ export interface PlaceOrderParams {
 
 /**
  * Place a **spot** order.
- * Spot payload is the flat `{ accountID, symbolID, clOrdID, side, type, quantity, ... }` shape.
- * Both `accountID` and `symbolID` are resolved from the exchange before posting.
+ * Uses the batch endpoint (POST /trade/orders/batch) with BatchNewOrderRequest shape:
+ *   { accountID, orders: [{ symbolID, clOrdID, side, type, timeInForce, price?, quantity?, funds? }] }
+ * Field order matches the Go struct definition for correct payloadHash computation.
  */
 async function placeSpotOrder(params: PlaceOrderParams): Promise<any> {
   const [accountState, symbolID] = await Promise.all([
@@ -272,27 +286,43 @@ async function placeSpotOrder(params: PlaceOrderParams): Promise<any> {
     throw new Error(`placeSpotOrder: symbolID not found for symbol "${params.symbol}"`);
   }
 
-  const payload: Record<string, any> = {
-    accountID: accountState.accountID,
+  // Default timeInForce: IOC (3) for market orders, GTC (1) for limit orders
+  const timeInForce = params.timeInForce ?? (params.type === 2 ? 3 : 1);
+
+  // Build BatchNewOrderItem in Go struct field order:
+  // symbolID, clOrdID, side, type, timeInForce, price(omitempty), quantity(omitempty), funds(omitempty)
+  const orderItem: Record<string, any> = {
     symbolID,
     clOrdID: generateClOrdID(),
     side: params.side,
     type: params.type,
-    quantity: params.quantity,
+    timeInForce,
   };
-  if (params.price !== undefined) payload.price = params.price;
-  if (params.timeInForce !== undefined) payload.timeInForce = params.timeInForce;
+  if (params.price !== undefined) orderItem.price = params.price;
+  orderItem.quantity = params.quantity;
 
-  const res: any = await withRetry(() => spotClient.post('/trade/orders', payload));
+  // Build BatchNewOrderRequest in Go struct field order: accountID, orders
+  const payload = {
+    accountID: accountState.accountID,
+    orders: [orderItem],
+  };
+
+  const res: any = await withRetry(() => spotClient.post('/trade/orders/batch', payload));
   const data = res?.data ?? res ?? {};
   assertNoBodyError(data);
-  return data;
+
+  // Spot batch response is an array; unwrap first element
+  const firstResult = Array.isArray(data) ? data[0] : data;
+  return firstResult ?? data;
 }
 
 /**
  * Place a **perps** order.
  * Perps payload must be `{ accountID, symbolID, orders: [...] }`.
- * Derives `accountID` and `symbolID` from the exchange before posting.
+ * PerpsOrderItem fields must be in Go struct order:
+ *   clOrdID, modifier, side, type, timeInForce, price(omitempty), quantity(omitempty),
+ *   funds(omitempty), stopPrice(omitempty), stopType(omitempty), triggerType(omitempty),
+ *   reduceOnly, positionSide
  */
 async function placePerpsOrder(params: PlaceOrderParams): Promise<any> {
   const [accountState, symbolID] = await Promise.all([
@@ -304,15 +334,26 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<any> {
     throw new Error(`placePerpsOrder: symbolID not found for symbol "${params.symbol}"`);
   }
 
+  // Default timeInForce: IOC (3) for market orders, GTC (1) for limit orders
+  const timeInForce = params.timeInForce ?? (params.type === 2 ? 3 : 1);
+
+  // Build PerpsOrderItem in Go struct field order (omitempty fields excluded when absent):
+  // clOrdID, modifier, side, type, timeInForce, price?, quantity?, funds?, stopPrice?,
+  // stopType?, triggerType?, reduceOnly, positionSide
   const order: Record<string, any> = {
     clOrdID: generateClOrdID(),
+    modifier: 1,        // NORMAL = 1
     side: params.side,
     type: params.type,
-    quantity: params.quantity,
+    timeInForce,
   };
   if (params.price !== undefined) order.price = params.price;
-  if (params.timeInForce !== undefined) order.timeInForce = params.timeInForce;
+  order.quantity = params.quantity;
+  // funds, stopPrice, stopType, triggerType omitted (omitempty, unused for regular orders)
+  order.reduceOnly = false;
+  order.positionSide = 1; // BOTH = 1
 
+  // Build PerpsNewOrderRequest in Go struct field order: accountID, symbolID, orders
   const payload = {
     accountID: accountState.accountID,
     symbolID,
@@ -323,8 +364,8 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<any> {
   const data = res?.data ?? res ?? {};
   assertNoBodyError(data);
 
-  // Normalise perps response: unwrap the first order result if orders array is returned
-  const firstOrder = Array.isArray(data?.orders) ? data.orders[0] : data;
+  // Unwrap the first order result from the response array
+  const firstOrder = Array.isArray(data) ? data[0] : (Array.isArray(data?.orders) ? data.orders[0] : data);
   return firstOrder ?? data;
 }
 
@@ -333,10 +374,64 @@ export async function placeOrder(params: PlaceOrderParams, market: 'spot' | 'per
 }
 
 export async function cancelOrder(orderId: string, symbol: string, market: 'spot' | 'perps' = 'perps') {
-  const client = getClient(market);
-  const sym = normalizeSymbol(symbol, market);
-  const res: any = await withRetry(() => client.post('/trade/orders/cancel', { orderId, symbol: sym }));
-  return res?.data ?? res ?? {};
+  if (market === 'perps') {
+    const [accountState, symbolID] = await Promise.all([
+      fetchPerpsAccountState(),
+      fetchPerpsSymbolID(symbol),
+    ]);
+    if (symbolID == null) throw new Error(`cancelOrder: symbolID not found for "${symbol}"`);
+
+    // PerpsCancelItem in Go struct field order: symbolID, orderID(omitempty), clOrdID(omitempty)
+    const cancelItem: Record<string, any> = { symbolID };
+    const numericOrderId = parseOrderIdNumeric(orderId);
+    if (orderId && !isNaN(numericOrderId)) {
+      cancelItem.orderID = numericOrderId;
+    } else if (orderId) {
+      cancelItem.clOrdID = orderId;
+    }
+
+    // PerpsCancelOrderRequest in Go struct field order: accountID, cancels
+    const payload = {
+      accountID: accountState.accountID,
+      cancels: [cancelItem],
+    };
+
+    const res: any = await withRetry(() => perpsClient.delete('/trade/orders', { data: payload }));
+    const data = res?.data ?? res ?? {};
+    assertNoBodyError(data);
+    return data;
+  } else {
+    // Spot
+    const [accountState, symbolID] = await Promise.all([
+      fetchSpotAccountState(),
+      fetchSpotSymbolID(symbol),
+    ]);
+    if (symbolID == null) throw new Error(`cancelOrder: symbolID not found for "${symbol}"`);
+
+    // BatchCancelOrderItem in Go struct field order:
+    // symbolID, clOrdID(required — new ID for this cancel request), orderID(omitempty), origClOrdID(omitempty)
+    const cancelItem: Record<string, any> = {
+      symbolID,
+      clOrdID: generateClOrdID(), // unique ID for this cancellation request
+    };
+    const numericOrderId = parseOrderIdNumeric(orderId);
+    if (orderId && !isNaN(numericOrderId)) {
+      cancelItem.orderID = numericOrderId;
+    } else if (orderId) {
+      cancelItem.origClOrdID = orderId; // treat string as original client order ID
+    }
+
+    // BatchCancelOrderRequest in Go struct field order: accountID, cancels
+    const payload = {
+      accountID: accountState.accountID,
+      cancels: [cancelItem],
+    };
+
+    const res: any = await withRetry(() => spotClient.delete('/trade/orders/batch', { data: payload }));
+    const data = res?.data ?? res ?? {};
+    assertNoBodyError(data);
+    return data;
+  }
 }
 
 export async function cancelAllOrders(symbol?: string, market: 'spot' | 'perps' = 'perps') {
@@ -416,12 +511,13 @@ export interface OrderStatusResult {
 }
 
 /**
- * Fetch the current status and fill information for a specific order.
- * The `symbol` parameter is forwarded as a query param for exchanges that
- * shard order storage by market; it is harmless for exchanges where `orderId`
- * is globally unique.
- * Returns null if the endpoint is unavailable or the response has an unexpected
- * format — callers must treat null as "unverifiable" and must NOT count volume.
+ * Fetch fill information for a specific order using the trades endpoint.
+ * GET /accounts/{addr}/trades?symbol={sym}&orderID={id}&limit=50
+ *
+ * Returns aggregated fill data if any trades were found for the order.
+ * Returns a zero-fill result (status EXPIRED) when no trades exist — meaning
+ * the IOC order expired unfilled. Returns null only when the endpoint itself
+ * fails (treat as "unverifiable").
  */
 export async function fetchOrderStatus(
   orderId: string,
@@ -432,24 +528,44 @@ export async function fetchOrderStatus(
   if (!address) return null;
   const client = getClient(market);
   const sym = normalizeSymbol(symbol, market);
+  const numericOrderId = parseOrderIdNumeric(orderId);
   try {
-    // Try the per-order endpoint first
-    const res: any = await client.get(`/accounts/${address}/orders/${orderId}`, {
-      params: { symbol: sym },
+    const res: any = await client.get(`/accounts/${address}/trades`, {
+      params: {
+        symbol: sym,
+        ...(orderId && !isNaN(numericOrderId) ? { orderID: numericOrderId } : {}),
+        limit: 50,
+      },
     });
-    const data = res?.data ?? res ?? {};
-    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    const trades: any[] = res?.data ?? res ?? [];
+    if (!Array.isArray(trades)) return null;
 
-    const status: string =
-      data.status ?? data.orderStatus ?? data.order_status ?? 'UNKNOWN';
-    const filledQty =
-      parseFloat(
-        data.filledQty ?? data.executedQty ?? data.filled_qty ?? data.cumQty ?? '0',
-      ) || 0;
-    const avgFillPrice =
-      parseFloat(data.avgFillPrice ?? data.avgPrice ?? data.avg_price ?? '0') || 0;
+    if (trades.length === 0) {
+      // No fills found. For IOC/GTX orders this typically means the order expired
+      // unfilled. It may also mean the order is still in flight (unlikely after the
+      // FILL_VERIFICATION_DELAY_MS wait). Using EXPIRED is a safe assumption here;
+      // callers that see filledQty === 0 will not count volume.
+      return { orderId, status: 'EXPIRED', filledQty: 0, avgFillPrice: 0, filledValue: 0 };
+    }
 
-    return { orderId, status, filledQty, avgFillPrice, filledValue: filledQty * avgFillPrice };
+    // Aggregate fills across all trade executions for this order
+    let totalQty = 0;
+    let totalValue = 0;
+    for (const t of trades) {
+      const qty = parseFloat(t.quantity ?? '0') || 0;
+      const price = parseFloat(t.price ?? '0') || 0;
+      totalQty += qty;
+      totalValue += qty * price;
+    }
+    const avgFillPrice = totalQty > 0 ? totalValue / totalQty : 0;
+
+    return {
+      orderId,
+      status: 'FILLED',
+      filledQty: totalQty,
+      avgFillPrice,
+      filledValue: totalValue,
+    };
   } catch {
     return null;
   }
@@ -466,7 +582,7 @@ export async function fetchAccountFills(
   if (!address) throw new Error('No wallet configured');
   const client = getClient(market);
   try {
-    const res: any = await client.get(`/accounts/${address}/fills`, {
+    const res: any = await client.get(`/accounts/${address}/trades`, {
       params: { limit },
     });
     const list = res?.data ?? res ?? [];

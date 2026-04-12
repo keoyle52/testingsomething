@@ -183,8 +183,8 @@ export const VolumeBot: React.FC = () => {
           market,
         );
 
-        const buyOrderId: string = buyResult?.orderId ?? buyResult?.id ?? '';
-        const sellOrderId: string = sellResult?.orderId ?? sellResult?.id ?? '';
+        const buyOrderId: string = String(buyResult?.orderID ?? buyResult?.orderId ?? buyResult?.id ?? '');
+        const sellOrderId: string = String(sellResult?.orderID ?? sellResult?.orderId ?? sellResult?.id ?? '');
 
         s.addLog({
           time: new Date().toLocaleTimeString(),
@@ -282,11 +282,11 @@ export const VolumeBot: React.FC = () => {
         });
 
         const result = await placeOrder(
-          { symbol: s.symbol, side, type: 2, quantity: quantity.toFixed(8) },
+          { symbol: s.symbol, side, type: 2, quantity: quantity.toFixed(8), timeInForce: 3 },
           market,
         );
 
-        const orderId: string = result?.orderId ?? result?.id ?? '';
+        const orderId: string = String(result?.orderID ?? result?.orderId ?? result?.id ?? '');
 
         s.addLog({
           time: new Date().toLocaleTimeString(),

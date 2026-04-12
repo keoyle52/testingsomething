@@ -32,26 +32,37 @@ export function getMonotonicNonce(): string {
 }
 
 /**
- * Deterministic JSON serialiser: recursively sorts object keys so that
- * `{ b: 1, a: 2 }` and `{ a: 2, b: 1 }` produce the same string and
- * therefore the same keccak256 hash. Arrays preserve their element order
- * but any objects within them are also key-sorted recursively.
+ * Derive the Sodex action type string from an HTTP method and URL path.
+ * Used by the axios interceptors to build the correct payloadHash wrapper.
  */
-export function stableStringify(value: unknown): string {
-  if (value === null || value === undefined) {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return '[' + value.map(stableStringify).join(',') + ']';
-  }
-  if (typeof value === 'object') {
-    const keys = Object.keys(value as object).sort();
-    return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify((value as Record<string, unknown>)[k])).join(',') + '}';
-  }
-  return JSON.stringify(value);
+export function deriveActionType(method: string, url: string): string {
+  const m = method.toUpperCase();
+  if (url.includes('/trade/orders/schedule-cancel')) return 'scheduleCancel';
+  if (url.includes('/trade/orders/replace')) return 'replaceOrder';
+  if (url.includes('/trade/orders/modify')) return 'modifyOrder';
+  if (url.includes('/trade/orders') && m === 'DELETE') return 'cancelOrder';
+  if (url.includes('/trade/orders')) return 'newOrder';
+  if (url.includes('/accounts/transfers')) return 'transferAsset';
+  if (url.includes('/leverage')) return 'updateLeverage';
+  if (url.includes('/margin')) return 'updateMargin';
+  return 'action';
 }
 
+/**
+ * Sign a Sodex write request using EIP-712.
+ *
+ * payloadHash is computed as:
+ *   keccak256(JSON.stringify({ "type": actionType, "params": payload }))
+ *
+ * The key order in the params object must match the Go struct field order
+ * (JSON.stringify preserves insertion order, so callers must construct
+ * objects in the correct order).
+ *
+ * The returned signature has the Sodex typed-signature prefix byte (0x01)
+ * prepended.
+ */
 export async function signPayload(
+  actionType: string,
   payload: any,
   privateKey: string,
   type: DomainType,
@@ -59,8 +70,12 @@ export async function signPayload(
 ): Promise<{ signature: string; nonce: string }> {
   const wallet = new ethers.Wallet(privateKey);
   const nonce = getMonotonicNonce();
-  
-  const payloadString = stableStringify(payload ?? {});
+
+  // Wrap in the {type, params} envelope required by Sodex before hashing.
+  // JSON.stringify without replacer/indent preserves insertion order of
+  // object keys, which must match the Go struct field order.
+  const signingPayload = { type: actionType, params: payload ?? {} };
+  const payloadString = JSON.stringify(signingPayload);
   const payloadHash = ethers.keccak256(ethers.toUtf8Bytes(payloadString));
 
   const domain = getDomain(type, isTestnet);
@@ -70,7 +85,7 @@ export async function signPayload(
   };
 
   const rawSignature = await wallet.signTypedData(domain, EIP712_TYPES, values);
-  const signature = "0x01" + rawSignature.slice(2);
+  const signature = '0x01' + rawSignature.slice(2);
 
   return { signature, nonce };
 }

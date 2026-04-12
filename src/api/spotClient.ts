@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { signPayload } from './signer';
+import { signPayload, deriveActionType } from './signer';
 import { useSettingsStore } from '../store/settingsStore';
 
 const BASE_URL_MAINNET = 'https://mainnet-gw.sodex.dev/api/v1/spot';
@@ -13,11 +13,14 @@ spotClient.interceptors.request.use(async (config) => {
   config.baseURL = baseURL;
 
   const { apiKeyName, privateKey, isTestnet } = state;
-  
-  if (apiKeyName && privateKey) {
-    const payload = config.method?.toUpperCase() === 'GET' ? {} : config.data || {};
+  const method = (config.method ?? 'GET').toUpperCase();
+
+  // Only sign write (non-GET) requests
+  if (method !== 'GET' && apiKeyName && privateKey) {
+    const payload = config.data || {};
+    const actionType = deriveActionType(method, config.url ?? '');
     try {
-      const { signature, nonce } = await signPayload(payload, privateKey, 'spot', isTestnet);
+      const { signature, nonce } = await signPayload(actionType, payload, privateKey, 'spot', isTestnet);
       config.headers['X-API-Key'] = apiKeyName;
       config.headers['X-API-Nonce'] = nonce;
       config.headers['X-API-Sign'] = signature;
