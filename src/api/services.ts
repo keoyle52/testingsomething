@@ -238,3 +238,11 @@ export async function fetchAccountOrders(
   const res: any = await withRetry(() => client.get(`/accounts/${addr}/orders`));
   return res?.data ?? res ?? [];
 }
+
+export async function fetchOrderStatus(orderId: string, market: 'spot' | 'perps' = 'perps') {
+  const address = getEvmAddress();
+  if (!address) throw new Error('No wallet configured');
+  const client = getClient(market);
+  const res: any = await withRetry(() => client.get(`/accounts/${address}/orders/${orderId}`));
+  return res?.data ?? res ?? {};
+}

@@ -17,6 +17,7 @@ interface VolumeBotState {
   totalFee: number;
   totalSpent: number;
   avgSpread: number;
+  skippedCount: number;
   logs: any[];
   setField: (field: keyof VolumeBotState, value: any) => void;
   addLog: (log: any) => void;
@@ -63,6 +64,7 @@ export const useBotStore = create<BotStoreState>((set) => ({
     totalFee: 0,
     totalSpent: 0,
     avgSpread: 0,
+    skippedCount: 0,
     logs: [],
     setField: (field, value) =>
       set((state) => ({
@@ -70,7 +72,7 @@ export const useBotStore = create<BotStoreState>((set) => ({
       })),
     addLog: (log) =>
       set((state) => {
-        const newLogs = [log, ...state.volumeBot.logs].slice(0, 20);
+        const newLogs = [log, ...state.volumeBot.logs].slice(0, 50);
         return { volumeBot: { ...state.volumeBot, logs: newLogs } };
       }),
     resetStats: () =>
@@ -82,6 +84,7 @@ export const useBotStore = create<BotStoreState>((set) => ({
           totalFee: 0,
           totalSpent: 0,
           avgSpread: 0,
+          skippedCount: 0,
           logs: [],
           status: 'STOPPED'
         },

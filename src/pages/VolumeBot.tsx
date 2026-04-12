@@ -115,50 +115,68 @@ export const VolumeBot: React.FC = () => {
 
       const quantity = min + Math.random() * (max - min);
 
-      // Smart strategy: use LIMIT orders at mid-price (maker) for lower fees
-      // If budget mode is active, place both BUY and SELL at mid-price to self-match
-      // producing volume with zero price risk and only paying fees
+      // Helper: parse fill info from an order response
+      function parseFill(result: any, price: number) {
+        const filledQty = parseFloat(
+          result?.filledQty ?? result?.filled_qty ?? result?.executedQty ?? result?.executed_qty ?? '0'
+        );
+        const filledNotional = parseFloat(
+          result?.filledNotional ?? result?.filled_notional ?? result?.executedNotional ?? '0'
+        );
+        const status = result?.status ?? result?.orderStatus ?? '';
+        const isFilled = status === 'FILLED' || status === 'PARTIALLY_FILLED' || filledQty > 0;
+        const actualVolume = filledNotional > 0 ? filledNotional : filledQty * price;
+        return { filledQty, filledNotional, actualVolume, isFilled, status };
+      }
+
+      // Smart strategy: Post-Only LIMIT (GTX) — maker fee, real exchange volume
       if (hasBudget) {
-        // Place BUY and SELL LIMIT at mid-price to create volume with minimal cost
-        const limitPrice = midPrice.toString();
         const qty = quantity.toFixed(8);
 
-        // Place BUY
+        // BUY LIMIT Post-Only @ bestAsk — hits lowest ask, enters as maker
         const buyResult = await placeOrder(
-          { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: limitPrice, timeInForce: 3 }, // side:1=BUY, type:1=LIMIT, timeInForce:3=IOC
-          market,
-        );
-        // Place SELL at same price to self-match for volume
-        const sellResult = await placeOrder(
-          { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: limitPrice, timeInForce: 3 }, // side:2=SELL, type:1=LIMIT, timeInForce:3=IOC
+          { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: askPrice.toString(), timeInForce: 4 }, // side:1=BUY, type:1=LIMIT, timeInForce:4=GTX(Post-Only)
           market,
         );
 
-        const vol = quantity * midPrice * 2; // Both sides create volume
-        // First order rests as maker, second order hits it as taker
-        const fee = quantity * midPrice * (feeRateRef.current.makerFee + feeRateRef.current.takerFee);
+        // 500ms delay — give exchange time to process BUY before SELL
+        await new Promise(r => setTimeout(r, 500));
+
+        // SELL LIMIT Post-Only @ bestBid — hits highest bid, enters as maker
+        const sellResult = await placeOrder(
+          { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: bidPrice.toString(), timeInForce: 4 }, // side:2=SELL, type:1=LIMIT, timeInForce:4=GTX(Post-Only)
+          market,
+        );
+
+        const buyFill = parseFill(buyResult, askPrice);
+        const sellFill = parseFill(sellResult, bidPrice);
+        const totalFilled = (buyFill.isFilled ? buyFill.actualVolume : 0) + (sellFill.isFilled ? sellFill.actualVolume : 0);
 
         const freshState = useBotStore.getState().volumeBot;
         const prevCount = freshState.tradesCount;
         const prevSpread = freshState.avgSpread;
 
-        freshState.setField('totalVolume', freshState.totalVolume + vol);
-        freshState.setField('tradesCount', prevCount + 2);
-        freshState.setField('totalFee', freshState.totalFee + fee);
-        freshState.setField('totalSpent', freshState.totalSpent + fee);
-        freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / (prevCount + 2));
-
-        freshState.addLog({
-          time: new Date().toLocaleTimeString(),
-          symbol: s.symbol,
-          side: 'BUY+SELL',
-          amount: quantity,
-          price: midPrice,
-          fee,
-          orderId: `${buyResult?.orderId ?? buyResult?.id ?? 'N/A'} / ${sellResult?.orderId ?? sellResult?.id ?? 'N/A'}`,
-        });
+        if (totalFilled > 0) {
+          // Fee: maker fee only (Post-Only orders)
+          const fee = totalFilled * feeRateRef.current.makerFee;
+          freshState.setField('totalVolume', freshState.totalVolume + totalFilled);
+          freshState.setField('tradesCount', prevCount + (buyFill.isFilled ? 1 : 0) + (sellFill.isFilled ? 1 : 0));
+          freshState.setField('totalFee', freshState.totalFee + fee);
+          freshState.setField('totalSpent', freshState.totalSpent + fee);
+          freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / (prevCount + 2));
+          freshState.addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `✓ BUY ${buyFill.isFilled ? buyFill.actualVolume.toFixed(2) + ' USDC' : '⚠️ CANCEL'} | SELL ${sellFill.isFilled ? sellFill.actualVolume.toFixed(2) + ' USDC' : '⚠️ CANCEL'}`,
+          });
+        } else {
+          freshState.setField('skippedCount', freshState.skippedCount + 1);
+          freshState.addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `⚠️ Emir execute olmadı (BUY: ${buyFill.status || 'N/A'}, SELL: ${sellFill.status || 'N/A'})`,
+          });
+        }
       } else {
-        // Classic mode: single market order
+        // Classic mode: single market order (taker, fast execution)
         const side: 1 | 2 = Math.random() > 0.5 ? 1 : 2;
         const sideLabel = side === 1 ? 'BUY' : 'SELL';
         const fillPrice = side === 1 ? askPrice : bidPrice;
@@ -168,28 +186,35 @@ export const VolumeBot: React.FC = () => {
           market,
         );
 
-        const vol = quantity * fillPrice;
-        const fee = vol * feeRateRef.current.takerFee; // Market order = taker
-
+        const fill = parseFill(result, fillPrice);
         const freshState = useBotStore.getState().volumeBot;
         const prevCount = freshState.tradesCount;
         const prevSpread = freshState.avgSpread;
 
-        freshState.setField('totalVolume', freshState.totalVolume + vol);
-        freshState.setField('tradesCount', prevCount + 1);
-        freshState.setField('totalFee', freshState.totalFee + fee);
-        freshState.setField('totalSpent', freshState.totalSpent + fee);
-        freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / (prevCount + 1));
-
-        freshState.addLog({
-          time: new Date().toLocaleTimeString(),
-          symbol: s.symbol,
-          side: sideLabel,
-          amount: quantity,
-          price: fillPrice,
-          fee,
-          orderId: result?.orderId ?? result?.id,
-        });
+        if (fill.isFilled) {
+          const vol = fill.actualVolume > 0 ? fill.actualVolume : quantity * fillPrice;
+          const fee = vol * feeRateRef.current.takerFee; // Market order = taker
+          freshState.setField('totalVolume', freshState.totalVolume + vol);
+          freshState.setField('tradesCount', prevCount + 1);
+          freshState.setField('totalFee', freshState.totalFee + fee);
+          freshState.setField('totalSpent', freshState.totalSpent + fee);
+          freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / (prevCount + 1));
+          freshState.addLog({
+            time: new Date().toLocaleTimeString(),
+            symbol: s.symbol,
+            side: sideLabel,
+            amount: quantity,
+            price: fillPrice,
+            fee,
+            orderId: result?.orderId ?? result?.id,
+          });
+        } else {
+          freshState.setField('skippedCount', freshState.skippedCount + 1);
+          freshState.addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `⚠️ ${sideLabel} MARKET execute olmadı (status: ${fill.status || 'N/A'})`,
+          });
+        }
       }
     } catch (err: any) {
       const msg = err?.response?.data?.message ?? err?.message ?? 'Unknown error';
