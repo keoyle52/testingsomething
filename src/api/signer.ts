@@ -85,7 +85,14 @@ export async function signPayload(
   };
 
   const rawSignature = await wallet.signTypedData(domain, EIP712_TYPES, values);
-  const signature = '0x01' + rawSignature.slice(2);
+  const rawSigBytes = Array.from(ethers.getBytes(rawSignature));
+  // SoDEX Go verifier expects recovery ID as 0/1 (crypto.Sign format), while
+  // many EVM signature encoders emit 27/28.
+  if (rawSigBytes[64] >= 27) {
+    rawSigBytes[64] -= 27;
+  }
+  const normalizedRawSignature = ethers.hexlify(rawSigBytes);
+  const signature = '0x01' + normalizedRawSignature.slice(2);
 
   return { signature, nonce };
 }
