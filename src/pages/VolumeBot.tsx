@@ -101,11 +101,10 @@ export const VolumeBot: React.FC = () => {
       const quantity = min + Math.random() * (max - min);
 
       // Smart strategy: use LIMIT orders at mid-price (maker) for lower fees
-      // If budget mode is active, place both BUY and SELL at same price to self-match
+      // If budget mode is active, place both BUY and SELL at mid-price to self-match
       // producing volume with zero price risk and only paying fees
       if (hasBudget) {
-        // Place BUY LIMIT at best bid (or mid) and SELL LIMIT at best bid
-        // This creates wash volume with no slippage, only fee cost
+        // Place BUY and SELL LIMIT at mid-price to create volume with minimal cost
         const limitPrice = midPrice.toString();
         const qty = quantity.toFixed(8);
 
