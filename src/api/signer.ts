@@ -85,7 +85,17 @@ export async function signPayload(
   };
 
   const rawSignature = await wallet.signTypedData(domain, EIP712_TYPES, values);
-  const signature = '0x01' + rawSignature.slice(2);
+  const rawSigBytes = ethers.getBytes(rawSignature);
+  // SoDEX Go verifier expects recovery ID as 0/1 (crypto.Sign format), while
+  // many EVM signature encoders emit 27/28.
+  const recoveryId = rawSigBytes[64];
+  if (recoveryId === 27 || recoveryId === 28) {
+    rawSigBytes[64] = recoveryId - 27;
+  } else if (recoveryId !== 0 && recoveryId !== 1) {
+    throw new Error(`Unexpected ECDSA recovery id: ${recoveryId}`);
+  }
+  const normalizedRawSignature = ethers.hexlify(rawSigBytes);
+  const signature = '0x01' + normalizedRawSignature.slice(2);
 
   return { signature, nonce };
 }
