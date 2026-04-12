@@ -14,6 +14,9 @@ import { Button } from '../components/common/Button';
 
 const DEFAULT_INTERVAL_SEC = 10;
 const PERPS_LEVERAGE = 10;
+const MAX_QUANTITY_PRECISION = 12;
+const ROUND_TRIP_SIDES = 2;
+const MIN_FEE_RATE = 0.00000001;
 /** Stop bot after this many consecutive attempts where no fill could be verified. */
 const MAX_CONSECUTIVE_UNVERIFIED = 5;
 /** How long to wait (ms) after placing an order before querying its fill status. */
@@ -31,7 +34,7 @@ function classifyError(err: unknown): string {
     return 'AUTH/SIGNATURE ERROR — check API key, private key, and nonce';
   }
   if (body.includes('insufficient') || body.includes('balance') || body.includes('margin')) {
-    return 'INSUFFICIENT MARGIN — bütçe yetersiz, kullanılan bütçeyi yükseltin veya perps/spot seçimini kontrol edin';
+    return 'INSUFFICIENT MARGIN — bütçe yetersiz, kullanılacak bütçeyi yükseltin veya perps/spot seçimini kontrol edin';
   }
   if (body.includes('quantity') || body.includes('lot size') || body.includes('step size')) {
     return 'QUANTITY INVALID — miktar adımı/symbol kuralı ile uyuşmuyor, bütçe artırılmalı';
@@ -108,6 +111,13 @@ export const VolumeBot: React.FC = () => {
     const hasBudget = budgetVal > 0;
     const normalizedSym = normalizeSymbol(s.symbol, market);
 
+    if (!hasBudget) {
+      runningRef.current = false;
+      s.setField('status', 'STOPPED');
+      s.addLog({ time: new Date().toLocaleTimeString(), message: 'Kullanılacak bütçe sıfır olamaz. Bot durdu.' });
+      return;
+    }
+
     try {
       const orderbook = await fetchOrderbook(s.symbol, market, 5);
       const bestBid = orderbook?.bids?.[0]?.[0] ?? orderbook?.bids?.[0]?.price;
@@ -129,17 +139,12 @@ export const VolumeBot: React.FC = () => {
 
       const spread = ((askPrice - bidPrice) / midPrice) * 100;
 
-      if (!hasBudget) {
-        runningRef.current = false;
-        s.setField('status', 'STOPPED');
-        s.addLog({ time: new Date().toLocaleTimeString(), message: 'Kullanılacak bütçe 0 olamaz. Bot durdu.' });
-        return;
-      }
-
       const rules = await fetchSymbolTradingRules(s.symbol, market);
-      const quantityPrecision = Math.max(0, Math.min(12, rules.quantityPrecision || 8));
-      const stepSize = rules.stepSize > 0 ? rules.stepSize : (1 / Math.pow(10, quantityPrecision));
-      let maxQty = effectiveBudget / (midPrice * 2);
+      const quantityPrecision = Math.max(0, Math.min(MAX_QUANTITY_PRECISION, rules.quantityPrecision || 8));
+      const stepSize = rules.stepSize > 0 ? rules.stepSize : Number(`1e-${quantityPrecision}`);
+      const quantityStepEpsilon = Math.max(stepSize * 1e-9, Number.EPSILON);
+      // Round-trip strategy sends both BUY and SELL, so reserve half budget per side.
+      let maxQtyPerSide = effectiveBudget / (midPrice * ROUND_TRIP_SIDES);
 
       if (maxSpendLimit > 0) {
         const spendRemaining = maxSpendLimit - s.totalSpent;
@@ -149,12 +154,13 @@ export const VolumeBot: React.FC = () => {
           s.addLog({ time: new Date().toLocaleTimeString(), message: `Max harcama limiti ($${maxSpendLimit.toFixed(2)}) doldu. Bot durdu.` });
           return;
         }
-        const roundTripFeeRate = Math.max(feeRateRef.current.takerFee * 2, 0.00000001);
+        const roundTripFeeRate = Math.max(feeRateRef.current.takerFee * ROUND_TRIP_SIDES, MIN_FEE_RATE);
         const maxQtyBySpend = spendRemaining / (midPrice * roundTripFeeRate);
-        maxQty = Math.min(maxQty, maxQtyBySpend);
+        maxQtyPerSide = Math.min(maxQtyPerSide, maxQtyBySpend);
       }
 
-      const quantity = Math.floor(maxQty / stepSize) * stepSize;
+      // Add a tiny relative epsilon to avoid float underflow on exact step boundaries.
+      const quantity = Math.floor((maxQtyPerSide + quantityStepEpsilon) / stepSize) * stepSize;
       if (quantity <= 0) {
         s.addLog({ time: new Date().toLocaleTimeString(), message: 'Kalan bütçe/limit yetersiz. Atlanıyor.' });
         return;
@@ -433,7 +439,7 @@ export const VolumeBot: React.FC = () => {
       <ConfirmModal
         isOpen={showConfirm}
         title="Volume Bot'u Başlat"
-        message={`Volume Bot başlatılacak.\nPiyasa: ${state.isSpot ? 'Spot' : 'Perps'}${!state.isSpot ? `\nKaldıraç: ${PERPS_LEVERAGE}x (otomatik)` : ''}\nKullanılacak bütçe: $${state.budget || '0'}\nHarcanılacak bütçe: $${state.maxSpend || '0'}\nHedef hacim: $${state.maxVolumeTarget || '0'}`}
+        message={`Volume Bot başlatılacak.\nPiyasa: ${state.isSpot ? 'Spot' : 'Perps'}${!state.isSpot ? `\nKaldıraç: ${PERPS_LEVERAGE}x (otomatik)` : ''}\nKullanılacak bütçe: $${state.budget || '0'}\nHarcanacak bütçe: $${state.maxSpend || '0'}\nHedef hacim: $${state.maxVolumeTarget || '0'}`}
         onConfirm={doStart}
         onCancel={() => setShowConfirm(false)}
       />
@@ -470,7 +476,7 @@ export const VolumeBot: React.FC = () => {
         />
 
         <Input
-          label="Harcanılacak Bütçe ($)"
+          label="Harcanacak Bütçe ($)"
           type="number"
           value={state.maxSpend}
           onChange={(e) => state.setField('maxSpend', e.target.value)}

@@ -112,7 +112,9 @@ export interface SymbolPrecision {
 }
 
 export interface SymbolTradingRules {
+  /** Decimal places allowed for quantity on the current symbol (lot-size precision). */
   quantityPrecision: number;
+  /** Minimum quantity increment for orders on the current symbol. */
   stepSize: number;
 }
 
