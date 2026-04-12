@@ -4,12 +4,17 @@ import { useSettingsStore } from '../store/settingsStore';
 import { Wifi, WifiOff, Globe } from 'lucide-react';
 
 const PAGE_TITLES: Record<string, string> = {
+  '/dashboard': 'Dashboard',
   '/volume-bot': 'Volume Bot',
   '/grid-bot': 'Grid Bot',
+  '/twap-bot': 'TWAP Bot',
+  '/dca-bot': 'DCA Bot',
   '/copy-trader': 'Copy Trader',
   '/positions': 'Position Monitor',
   '/funding': 'Funding Tracker',
   '/schedule-cancel': 'Schedule Cancel',
+  '/alerts': 'Fiyat Alarmlari',
+  '/backtesting': 'Backtesting',
   '/settings': 'Settings',
 };
 
