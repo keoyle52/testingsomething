@@ -68,7 +68,9 @@ export const TwapBot: React.FC = () => {
       );
 
       const vol = sliceAmount * fillPrice;
-      const fee = vol * 0.001;
+      // SoDEX taker fee: Perps 0.040%, Spot 0.065%
+      const takerRate = isSpot ? 0.00065 : 0.0004;
+      const fee = vol * takerRate;
 
       setExecutedSlices((p) => p + 1);
       setExecutedVolume((p) => p + vol);

@@ -11,7 +11,19 @@ import { StatCard } from '../components/common/Card';
 import { Input } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 
-const FEE_RATE = 0.001;
+// SoDEX fee rates (Tier 1, ≤$5M 14-day volume)
+// Perps: maker 0.012%, taker 0.040%
+// Spot:  maker 0.035%, taker 0.065%
+const FEE_RATES = {
+  perps: { maker: 0.00012, taker: 0.0004 },
+  spot:  { maker: 0.00035, taker: 0.00065 },
+} as const;
+
+function getFeeRate(isSpot: boolean, isMaker: boolean): number {
+  const market = isSpot ? 'spot' : 'perps';
+  return isMaker ? FEE_RATES[market].maker : FEE_RATES[market].taker;
+}
+
 const DEFAULT_INTERVAL_SEC = 10;
 
 function getLeverage(isSpot: boolean, leverage: string): number {
@@ -99,8 +111,9 @@ export const VolumeBot: React.FC = () => {
           s.addLog({ time: new Date().toLocaleTimeString(), message: `Max harcama limiti ($${maxSpendLimit.toFixed(2)}) doldu. Bot durdu.` });
           return;
         }
-        // Each trade costs ~2x fee (buy+sell), cap quantity so fees stay within limit
-        const maxQtyBySpend = spendRemaining / (midPrice * FEE_RATE * 2);
+        // Each trade costs maker+taker fee (buy+sell), cap quantity so fees stay within limit
+        const combinedFeeRate = getFeeRate(s.isSpot, true) + getFeeRate(s.isSpot, false);
+        const maxQtyBySpend = spendRemaining / (midPrice * combinedFeeRate);
         max = Math.min(max, maxQtyBySpend);
         min = Math.min(min, max);
       }
@@ -132,7 +145,10 @@ export const VolumeBot: React.FC = () => {
         );
 
         const vol = quantity * midPrice * 2; // Both sides create volume
-        const fee = quantity * midPrice * FEE_RATE * 2; // Fee on each side separately
+        const makerRate = getFeeRate(s.isSpot, true);
+        const takerRate = getFeeRate(s.isSpot, false);
+        // First order rests as maker, second order hits it as taker
+        const fee = quantity * midPrice * (makerRate + takerRate);
 
         const freshState = useBotStore.getState().volumeBot;
         const prevCount = freshState.tradesCount;
@@ -165,7 +181,7 @@ export const VolumeBot: React.FC = () => {
         );
 
         const vol = quantity * fillPrice;
-        const fee = vol * FEE_RATE;
+        const fee = vol * getFeeRate(s.isSpot, false); // Market order = taker
 
         const freshState = useBotStore.getState().volumeBot;
         const prevCount = freshState.tradesCount;
