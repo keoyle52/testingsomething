@@ -103,18 +103,74 @@ export async function fetchSymbols(market: 'spot' | 'perps' = 'perps') {
   return res?.data ?? res ?? [];
 }
 
+export interface SymbolPrecision {
+  symbolID: number;
+  pricePrecision: number;
+  tickSize: number;
+  quantityPrecision: number;
+  stepSize: number;
+}
+
+/** Fallback price precision (decimal places) when symbol metadata is unavailable. */
+const DEFAULT_PRICE_PRECISION = 2;
+/** Fallback tick size for price when symbol metadata is unavailable. */
+const DEFAULT_TICK_SIZE = 0.01;
+/** Fallback quantity precision (decimal places) when symbol metadata is unavailable. */
+const DEFAULT_QUANTITY_PRECISION = 8;
+/** Fallback step size for quantity when symbol metadata is unavailable. */
+const DEFAULT_STEP_SIZE = 0.00000001;
+
+/**
+ * Round a raw value down to the nearest multiple of tickSize and format it
+ * with exactly `precision` decimal places, as required by the exchange.
+ * Uses integer arithmetic to avoid floating-point drift.
+ */
+function roundToTick(value: number, tickSize: number, precision: number): string {
+  if (tickSize <= 0 || precision < 0) return value.toFixed(Math.max(0, precision));
+  const factor = Math.pow(10, precision);
+  const tickUnits = Math.round(tickSize * factor);
+  const valueUnits = Math.floor(value * factor);
+  const remainder = valueUnits % tickUnits;
+  const rounded = (valueUnits - remainder) / factor;
+  return rounded.toFixed(precision);
+}
+
+/**
+ * Look up the full symbol entry (including precision metadata) for a given
+ * symbol on the specified market.  Returns null when not found.
+ */
+async function fetchSymbolEntry(symbol: string, market: 'spot' | 'perps'): Promise<any | null> {
+  try {
+    const symbols = await fetchSymbols(market);
+    const list: any[] = Array.isArray(symbols) ? symbols : (symbols?.symbols ?? symbols?.data ?? []);
+    const normalised = normalizeSymbol(symbol, market);
+    return list.find(
+      (s: any) => s.symbol === normalised || s.name === normalised || s.ticker === normalised,
+    ) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract SymbolPrecision from a raw symbol entry object.
+ * Falls back to safe defaults (8 decimal places, tick = 0.00000001) when fields are missing.
+ */
+function extractPrecision(entry: any): Omit<SymbolPrecision, 'symbolID'> {
+  const pricePrecision = entry?.pricePrecision ?? DEFAULT_PRICE_PRECISION;
+  const tickSize = parseFloat(entry?.tickSize ?? String(DEFAULT_TICK_SIZE)) || DEFAULT_TICK_SIZE;
+  const quantityPrecision = entry?.quantityPrecision ?? DEFAULT_QUANTITY_PRECISION;
+  const stepSize = parseFloat(entry?.stepSize ?? String(DEFAULT_STEP_SIZE)) || DEFAULT_STEP_SIZE;
+  return { pricePrecision, tickSize, quantityPrecision, stepSize };
+}
+
 /**
  * Look up the numeric symbolID for a given symbol name on the perps market.
  * Returns null if the symbol cannot be found.
  */
 export async function fetchPerpsSymbolID(symbol: string): Promise<number | null> {
   try {
-    const symbols = await fetchSymbols('perps');
-    const list: any[] = Array.isArray(symbols) ? symbols : (symbols?.symbols ?? symbols?.data ?? []);
-    const normalised = normalizeSymbol(symbol, 'perps');
-    const entry = list.find(
-      (s: any) => s.symbol === normalised || s.name === normalised || s.ticker === normalised,
-    );
+    const entry = await fetchSymbolEntry(symbol, 'perps');
     return entry?.symbolID ?? entry?.id ?? entry?.symbolId ?? null;
   } catch {
     return null;
@@ -161,12 +217,7 @@ export async function fetchSpotAccountState(): Promise<{ accountID: number | str
  */
 export async function fetchSpotSymbolID(symbol: string): Promise<number | null> {
   try {
-    const symbols = await fetchSymbols('spot');
-    const list: any[] = Array.isArray(symbols) ? symbols : (symbols?.symbols ?? symbols?.data ?? []);
-    const normalised = normalizeSymbol(symbol, 'spot');
-    const entry = list.find(
-      (s: any) => s.symbol === normalised || s.name === normalised || s.ticker === normalised,
-    );
+    const entry = await fetchSymbolEntry(symbol, 'spot');
     return entry?.symbolID ?? entry?.id ?? entry?.symbolId ?? null;
   } catch {
     return null;
@@ -277,17 +328,27 @@ export interface PlaceOrderParams {
  * Field order matches the Go struct definition for correct payloadHash computation.
  */
 async function placeSpotOrder(params: PlaceOrderParams): Promise<any> {
-  const [accountState, symbolID] = await Promise.all([
+  const [accountState, symbolEntry] = await Promise.all([
     fetchSpotAccountState(),
-    fetchSpotSymbolID(params.symbol),
+    fetchSymbolEntry(params.symbol, 'spot'),
   ]);
 
+  const symbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
   if (symbolID == null) {
     throw new Error(`placeSpotOrder: symbolID not found for symbol "${params.symbol}"`);
   }
 
+  const { pricePrecision, tickSize, quantityPrecision, stepSize } = extractPrecision(symbolEntry);
+
   // Default timeInForce: IOC (3) for market orders, GTC (1) for limit orders
   const timeInForce = params.timeInForce ?? (params.type === 2 ? 3 : 1);
+
+  // Round price and quantity to exchange-required precision/tick multiples
+  const rawQty = parseFloat(params.quantity);
+  const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
+  const price = params.price !== undefined
+    ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
+    : undefined;
 
   // Build BatchNewOrderItem in Go struct field order:
   // symbolID, clOrdID, side, type, timeInForce, price(omitempty), quantity(omitempty), funds(omitempty)
@@ -298,8 +359,8 @@ async function placeSpotOrder(params: PlaceOrderParams): Promise<any> {
     type: params.type,
     timeInForce,
   };
-  if (params.price !== undefined) orderItem.price = params.price;
-  orderItem.quantity = params.quantity;
+  if (price !== undefined) orderItem.price = price;
+  orderItem.quantity = quantity;
 
   // Build BatchNewOrderRequest in Go struct field order: accountID, orders
   const payload = {
@@ -325,17 +386,27 @@ async function placeSpotOrder(params: PlaceOrderParams): Promise<any> {
  *   reduceOnly, positionSide
  */
 async function placePerpsOrder(params: PlaceOrderParams): Promise<any> {
-  const [accountState, symbolID] = await Promise.all([
+  const [accountState, symbolEntry] = await Promise.all([
     fetchPerpsAccountState(),
-    fetchPerpsSymbolID(params.symbol),
+    fetchSymbolEntry(params.symbol, 'perps'),
   ]);
 
+  const symbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
   if (symbolID == null) {
     throw new Error(`placePerpsOrder: symbolID not found for symbol "${params.symbol}"`);
   }
 
+  const { pricePrecision, tickSize, quantityPrecision, stepSize } = extractPrecision(symbolEntry);
+
   // Default timeInForce: IOC (3) for market orders, GTC (1) for limit orders
   const timeInForce = params.timeInForce ?? (params.type === 2 ? 3 : 1);
+
+  // Round price and quantity to exchange-required precision/tick multiples
+  const rawQty = parseFloat(params.quantity);
+  const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
+  const price = params.price !== undefined
+    ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
+    : undefined;
 
   // Build PerpsOrderItem in Go struct field order (omitempty fields excluded when absent):
   // clOrdID, modifier, side, type, timeInForce, price?, quantity?, funds?, stopPrice?,
@@ -347,8 +418,8 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<any> {
     type: params.type,
     timeInForce,
   };
-  if (params.price !== undefined) order.price = params.price;
-  order.quantity = params.quantity;
+  if (price !== undefined) order.price = price;
+  order.quantity = quantity;
   // funds, stopPrice, stopType, triggerType omitted (omitempty, unused for regular orders)
   order.reduceOnly = false;
   order.positionSide = 1; // BOTH = 1
