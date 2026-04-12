@@ -7,21 +7,28 @@ interface StatusBadgeProps {
 }
 
 export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, className }) => {
-  const getStyles = () => {
-    switch (status) {
-      case 'RUNNING':
-        return 'bg-success/20 text-success border-success/30';
-      case 'ERROR':
-        return 'bg-danger/20 text-danger border-danger/30';
-      case 'STOPPED':
-      default:
-        return 'bg-surface text-text-secondary border-border';
-    }
-  };
+  const config = {
+    RUNNING: {
+      dotColor: 'bg-success',
+      text: 'RUNNING',
+      badgeClass: 'badge-success',
+    },
+    ERROR: {
+      dotColor: 'bg-danger',
+      text: 'ERROR',
+      badgeClass: 'badge-danger',
+    },
+    STOPPED: {
+      dotColor: 'bg-text-muted',
+      text: 'STOPPED',
+      badgeClass: 'badge-neutral',
+    },
+  }[status];
 
   return (
-    <div className={cn('px-2 py-1 text-xs uppercase font-medium border rounded-md', getStyles(), className)}>
-      {status}
+    <div className={cn('badge', config.badgeClass, className)}>
+      <span className={cn('w-1.5 h-1.5 rounded-full', config.dotColor, status === 'RUNNING' && 'animate-pulse-dot')} />
+      {config.text}
     </div>
   );
 };

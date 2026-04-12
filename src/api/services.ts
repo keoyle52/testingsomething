@@ -64,8 +64,19 @@ export async function fetchKlines(
   return res?.data ?? res ?? [];
 }
 
+export async function fetchCoins(market: 'spot' | 'perps' = 'perps') {
+  const client = getClient(market);
+  const res: any = await client.get('/markets/coins');
+  return res?.data ?? res ?? [];
+}
+
 export async function fetchMarkPrices() {
   const res: any = await perpsClient.get('/markets/mark-prices');
+  return res?.data ?? res ?? [];
+}
+
+export async function fetchFundingRates() {
+  const res: any = await perpsClient.get('/markets/funding-rates');
   return res?.data ?? res ?? [];
 }
 
@@ -110,7 +121,7 @@ export interface PlaceOrderParams {
   type: 1 | 2;           // 1=LIMIT, 2=MARKET
   quantity: string;
   price?: string;         // required for LIMIT
-  timeInForce?: 1 | 2 | 3 | 4; // 1=GTC, 2=FOK, 3=IOC, 4=GTX
+  timeInForce?: 1 | 3 | 4; // 1=GTC, 3=IOC, 4=GTX  (FOK not supported by SoDEX)
 }
 
 export async function placeOrder(params: PlaceOrderParams, market: 'spot' | 'perps' = 'perps') {

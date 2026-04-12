@@ -1,15 +1,25 @@
 @import "tailwindcss";
 
 @theme {
-  --color-background: #0a0a0a;
-  --color-surface: #111111;
-  --color-border: #1e1e1e;
+  --color-background: #06080d;
+  --color-surface: #0d1117;
+  --color-surface-hover: #161b22;
+  --color-border: #1b2230;
+  --color-border-hover: #2d3748;
   --color-primary: #FF6B00;
-  --color-text-primary: #ffffff;
-  --color-text-secondary: #888888;
-  --color-success: #22c55e;
-  --color-danger: #ef4444;
-  --font-sans: Inter, system-ui, sans-serif;
+  --color-primary-soft: #ff8c33;
+  --color-accent: #8b5cf6;
+  --color-text-primary: #e6edf3;
+  --color-text-secondary: #7d8590;
+  --color-text-muted: #484f58;
+  --color-success: #3fb950;
+  --color-success-soft: #238636;
+  --color-danger: #f85149;
+  --color-danger-soft: #da3633;
+  --color-warning: #d29922;
+  --color-info: #58a6ff;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 }
 
 :root {
@@ -27,10 +37,192 @@ body {
   color: var(--color-text-primary);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: var(--color-background); }
-::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: #4a4d55; }
+/* ─── Custom Scrollbar ─── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-border-hover); }
+
+/* ─── Glass Card ─── */
+.glass-card {
+  background: linear-gradient(135deg, rgba(13,17,23,0.8) 0%, rgba(13,17,23,0.6) 100%);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(27,34,48,0.6);
+  border-radius: 12px;
+}
+
+.glass-card-hover:hover {
+  border-color: rgba(255,107,0,0.2);
+  box-shadow: 0 0 20px rgba(255,107,0,0.05);
+}
+
+/* ─── Stat Card ─── */
+.stat-card {
+  background: linear-gradient(135deg, rgba(13,17,23,0.9) 0%, rgba(22,27,34,0.7) 100%);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(27,34,48,0.5);
+  border-radius: 12px;
+  padding: 16px 20px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,107,0,0.3), transparent);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.stat-card:hover::before {
+  opacity: 1;
+}
+
+.stat-card:hover {
+  border-color: rgba(255,107,0,0.15);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+}
+
+/* ─── Glow Effects ─── */
+.glow-primary { box-shadow: 0 0 20px rgba(255,107,0,0.15), 0 0 60px rgba(255,107,0,0.05); }
+.glow-success { box-shadow: 0 0 20px rgba(63,185,80,0.15), 0 0 60px rgba(63,185,80,0.05); }
+.glow-danger  { box-shadow: 0 0 20px rgba(248,81,73,0.15), 0 0 60px rgba(248,81,73,0.05); }
+
+/* ─── Pulse Animation ─── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.5); }
+}
+
+.animate-pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* ─── Gradient Text ─── */
+.gradient-text {
+  background: linear-gradient(135deg, #FF6B00, #ff8c33);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ─── Shimmer Loading ─── */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--color-surface) 25%, var(--color-surface-hover) 50%, var(--color-surface) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 6px;
+}
+
+/* ─── Input Focus Ring ─── */
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: rgba(255,107,0,0.5) !important;
+  box-shadow: 0 0 0 3px rgba(255,107,0,0.1);
+}
+
+/* ─── Table Styles ─── */
+.data-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(6,8,13,0.95);
+  backdrop-filter: blur(8px);
+}
+
+/* ─── Circular Progress ─── */
+.circular-progress {
+  transform: rotate(-90deg);
+}
+
+/* ─── Fade In ─── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* ─── Slide In ─── */
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.animate-slide-in {
+  animation: slideInRight 0.2s ease-out;
+}
+
+/* ─── Modal Backdrop ─── */
+@keyframes backdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-backdrop {
+  animation: backdropIn 0.2s ease-out;
+}
+
+/* ─── Count Up ─── */
+@keyframes countPulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+.animate-count-pulse {
+  animation: countPulse 0.3s ease-out;
+}
+
+/* ─── Tooltip ─── */
+.tooltip-content {
+  background: rgba(22,27,34,0.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  pointer-events: none;
+}
+
+/* ─── Badge Styles ─── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.badge-success { background: rgba(63,185,80,0.12); color: var(--color-success); border: 1px solid rgba(63,185,80,0.2); }
+.badge-danger { background: rgba(248,81,73,0.12); color: var(--color-danger); border: 1px solid rgba(248,81,73,0.2); }
+.badge-primary { background: rgba(255,107,0,0.12); color: var(--color-primary); border: 1px solid rgba(255,107,0,0.2); }
+.badge-neutral { background: rgba(125,133,144,0.12); color: var(--color-text-secondary); border: 1px solid rgba(125,133,144,0.2); }

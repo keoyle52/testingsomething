@@ -91,8 +91,8 @@ export const CopyTrader: React.FC = () => {
       if (order.type === 1 && order.price) {
         params.price = order.price;
       }
-      if (order.timeInForce) {
-        params.timeInForce = order.timeInForce as 1 | 2 | 3 | 4;
+      if (order.timeInForce && order.timeInForce !== 2) {
+        params.timeInForce = order.timeInForce as 1 | 3 | 4;
       }
 
       const sideLabel = order.side === 1 ? 'BUY' : 'SELL';

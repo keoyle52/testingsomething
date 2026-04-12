@@ -1,5 +1,6 @@
 import React from 'react';
-import { X } from 'lucide-react';
+import { X, AlertTriangle } from 'lucide-react';
+import { Button } from './Button';
 
 interface ConfirmModalProps {
   isOpen: boolean;
@@ -13,33 +14,34 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({ isOpen, title, messa
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="bg-surface border border-border w-full max-w-md rounded-lg shadow-xl shrink-0">
-        <div className="flex items-center justify-between p-4 border-b border-border">
-          <h3 className="text-lg font-semibold">{title}</h3>
-          <button onClick={onCancel} className="text-text-secondary hover:text-text-primary">
-            <X size={20} />
+    <div className="fixed inset-0 z-50 flex items-center justify-center animate-backdrop" style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)' }}>
+      <div className="glass-card w-full max-w-md shadow-2xl animate-fade-in" style={{ border: '1px solid rgba(27,34,48,0.8)' }}>
+        <div className="flex items-center gap-3 p-5 border-b border-border">
+          <div className="w-9 h-9 rounded-lg bg-warning/10 flex items-center justify-center text-warning shrink-0">
+            <AlertTriangle size={18} />
+          </div>
+          <h3 className="text-base font-semibold flex-1">{title}</h3>
+          <button onClick={onCancel} className="text-text-muted hover:text-text-primary transition-colors rounded-lg p-1 hover:bg-surface-hover">
+            <X size={18} />
           </button>
         </div>
-        <div className="p-4 text-text-secondary whitespace-pre-wrap">
+        <div className="p-5 text-sm text-text-secondary whitespace-pre-wrap leading-relaxed">
           {message}
         </div>
-        <div className="flex items-center justify-end gap-3 p-4 border-t border-border bg-black/20">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 text-sm font-medium rounded hover:bg-border/50 text-text-primary"
-          >
-            Cancel
-          </button>
-          <button
+        <div className="flex items-center justify-end gap-3 p-4 border-t border-border bg-background/30">
+          <Button variant="ghost" size="sm" onClick={onCancel}>
+            İptal
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
             onClick={() => {
               onConfirm();
               onCancel();
             }}
-            className="px-4 py-2 text-sm font-medium rounded bg-primary text-black hover:bg-primary/90"
           >
-            Confirm
-          </button>
+            Onayla
+          </Button>
         </div>
       </div>
     </div>

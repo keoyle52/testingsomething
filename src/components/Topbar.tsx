@@ -1,45 +1,53 @@
 import React from 'react';
 import { useLocation } from 'react-router-dom';
 import { useSettingsStore } from '../store/settingsStore';
-import { Activity } from 'lucide-react';
+import { Wifi, WifiOff, Globe } from 'lucide-react';
 
-const getTitle = (pathname: string) => {
-  switch (pathname) {
-    case '/volume-bot': return 'Volume Bot';
-    case '/grid-bot': return 'Grid Bot';
-    case '/copy-trader': return 'Copy Trader';
-    case '/positions': return 'Position Monitor';
-    case '/funding': return 'Funding Tracker';
-    case '/schedule-cancel': return 'Schedule Cancel';
-    case '/settings': return 'Settings';
-    default: return 'SoDEX Terminal';
-  }
+const PAGE_TITLES: Record<string, string> = {
+  '/volume-bot': 'Volume Bot',
+  '/grid-bot': 'Grid Bot',
+  '/copy-trader': 'Copy Trader',
+  '/positions': 'Position Monitor',
+  '/funding': 'Funding Tracker',
+  '/schedule-cancel': 'Schedule Cancel',
+  '/settings': 'Settings',
 };
 
 export const Topbar: React.FC = () => {
   const location = useLocation();
-  const title = getTitle(location.pathname);
+  const title = PAGE_TITLES[location.pathname] ?? 'SoDEX Terminal';
   const { apiKeyName, isTestnet } = useSettingsStore();
+  const isConnected = !!apiKeyName;
 
   return (
-    <header className="h-[48px] border-b border-border bg-surface flex items-center justify-between px-4 shrink-0">
-      <h1 className="text-sm font-semibold">{title}</h1>
-      
+    <header className="h-[52px] border-b border-border bg-surface/50 backdrop-blur-xl flex items-center justify-between px-5 shrink-0">
       <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-text-secondary">Network:</span>
-          <span className={isTestnet ? 'text-text-primary' : 'text-primary'}>
-            {isTestnet ? 'Testnet' : 'Mainnet'}
-          </span>
+        <h1 className="text-sm font-semibold text-text-primary">{title}</h1>
+      </div>
+
+      <div className="flex items-center gap-2">
+        {/* Network Badge */}
+        <div className={`badge ${isTestnet ? 'badge-neutral' : 'badge-primary'}`}>
+          <Globe size={11} />
+          {isTestnet ? 'Testnet' : 'Mainnet'}
         </div>
-        
-        <div className="w-px h-4 bg-border mx-1"></div>
-        
-        <div className="flex items-center gap-2 text-xs">
-          <Activity size={14} className={apiKeyName ? 'text-success' : 'text-text-secondary'} />
-          <span className={apiKeyName ? 'text-text-primary' : 'text-text-secondary'}>
-            {apiKeyName ? apiKeyName : 'No API Key'}
-          </span>
+
+        {/* Separator */}
+        <div className="w-px h-4 bg-border mx-1" />
+
+        {/* Connection Status */}
+        <div className={`badge ${isConnected ? 'badge-success' : 'badge-neutral'}`}>
+          {isConnected ? (
+            <>
+              <Wifi size={11} />
+              <span className="max-w-[100px] truncate">{apiKeyName}</span>
+            </>
+          ) : (
+            <>
+              <WifiOff size={11} />
+              Not Connected
+            </>
+          )}
         </div>
       </div>
     </header>

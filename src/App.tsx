@@ -32,15 +32,27 @@ function App() {
         </main>
       </div>
 
-      <Toaster 
+      <Toaster
         position="bottom-right"
         toastOptions={{
+          duration: 3000,
           style: {
-            background: '#111111',
-            color: '#ffffff',
-            border: '1px solid #1e1e1e'
-          }
-        }} 
+            background: 'rgba(13,17,23,0.95)',
+            color: '#e6edf3',
+            border: '1px solid rgba(27,34,48,0.8)',
+            backdropFilter: 'blur(12px)',
+            borderRadius: '10px',
+            fontSize: '13px',
+            padding: '12px 16px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          },
+          success: {
+            iconTheme: { primary: '#3fb950', secondary: '#0d1117' },
+          },
+          error: {
+            iconTheme: { primary: '#f85149', secondary: '#0d1117' },
+          },
+        }}
       />
     </div>
   );
