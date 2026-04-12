@@ -8,6 +8,7 @@ import { StatusBadge } from '../components/common/StatusBadge';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 
 const FEE_RATE = 0.001;
+const DEFAULT_INTERVAL_SEC = 10;
 
 export const VolumeBot: React.FC = () => {
   const { volumeBot: state } = useBotStore();
@@ -21,8 +22,8 @@ export const VolumeBot: React.FC = () => {
   }, [state.isSpot]);
 
   const executeTrade = useCallback(async () => {
-    const { volumeBot: s } = useBotStore.getState();
     if (!runningRef.current) return;
+    const { volumeBot: s } = useBotStore.getState();
 
     const maxVol = parseFloat(s.maxVolumeTarget);
     if (maxVol > 0 && s.totalVolume >= maxVol) {
@@ -71,13 +72,13 @@ export const VolumeBot: React.FC = () => {
       const fee = vol * FEE_RATE;
 
       const freshState = useBotStore.getState().volumeBot;
-      freshState.setField('totalVolume', freshState.totalVolume + vol);
-      freshState.setField('tradesCount', freshState.tradesCount + 1);
-      freshState.setField('totalFee', freshState.totalFee + fee);
-
+      const prevCount = freshState.tradesCount;
       const prevSpread = freshState.avgSpread;
-      const count = freshState.tradesCount;
-      freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / count);
+
+      freshState.setField('totalVolume', freshState.totalVolume + vol);
+      freshState.setField('tradesCount', prevCount + 1);
+      freshState.setField('totalFee', freshState.totalFee + fee);
+      freshState.setField('avgSpread', prevSpread + (spread - prevSpread) / (prevCount + 1));
 
       freshState.addLog({
         time: new Date().toLocaleTimeString(),
@@ -98,7 +99,7 @@ export const VolumeBot: React.FC = () => {
   const scheduleNext = useCallback(() => {
     if (!runningRef.current) return;
     const { volumeBot: s } = useBotStore.getState();
-    const interval = Math.max(1, parseInt(s.intervalSec) || 10) * 1000;
+    const interval = Math.max(1, parseInt(s.intervalSec) || DEFAULT_INTERVAL_SEC) * 1000;
     timerRef.current = setTimeout(async () => {
       await executeTrade();
       scheduleNext();
