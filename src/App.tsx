@@ -4,12 +4,17 @@ import { Toaster } from 'react-hot-toast';
 import { Sidebar } from './components/Sidebar';
 import { Topbar } from './components/Topbar';
 
+import { Dashboard } from './pages/Dashboard';
 import { VolumeBot } from './pages/VolumeBot';
 import { GridBot } from './pages/GridBot';
+import { TwapBot } from './pages/TwapBot';
+import { DcaBot } from './pages/DcaBot';
 import { CopyTrader } from './pages/CopyTrader';
 import { Positions } from './pages/Positions';
 import { FundingTracker } from './pages/FundingTracker';
 import { ScheduleCancel } from './pages/ScheduleCancel';
+import { Alerts } from './pages/Alerts';
+import { Backtesting } from './pages/Backtesting';
 import { Settings } from './pages/Settings';
 
 function App() {
@@ -20,14 +25,19 @@ function App() {
         <Topbar />
         <main className="flex-1 overflow-x-hidden overflow-y-auto bg-background">
           <Routes>
+            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/volume-bot" element={<VolumeBot />} />
             <Route path="/grid-bot" element={<GridBot />} />
+            <Route path="/twap-bot" element={<TwapBot />} />
+            <Route path="/dca-bot" element={<DcaBot />} />
             <Route path="/copy-trader" element={<CopyTrader />} />
             <Route path="/positions" element={<Positions />} />
             <Route path="/funding" element={<FundingTracker />} />
             <Route path="/schedule-cancel" element={<ScheduleCancel />} />
+            <Route path="/alerts" element={<Alerts />} />
+            <Route path="/backtesting" element={<Backtesting />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="*" element={<Navigate to="/volume-bot" replace />} />
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </main>
       </div>
