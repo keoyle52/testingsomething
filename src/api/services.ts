@@ -166,6 +166,42 @@ export async function cancelAllOrders(symbol?: string, market: 'spot' | 'perps' 
   return results;
 }
 
+// ---------- Fee Rates ----------
+
+/** Default Tier-1 fee rates used as fallback when API call fails */
+const DEFAULT_FEE_RATES = {
+  perps: { makerFee: 0.00012, takerFee: 0.0004 },
+  spot:  { makerFee: 0.00035, takerFee: 0.00065 },
+} as const;
+
+export interface FeeRateInfo {
+  makerFee: number;
+  takerFee: number;
+}
+
+/**
+ * Fetch the real maker/taker fee rates for the current account from the SoDEX API.
+ * Falls back to default Tier-1 rates if the call fails (e.g. no wallet configured).
+ */
+export async function fetchFeeRate(market: 'spot' | 'perps' = 'perps'): Promise<FeeRateInfo> {
+  try {
+    const address = getEvmAddress();
+    if (!address) throw new Error('No wallet configured');
+    const client = getClient(market);
+    const res: any = await withRetry(() => client.get(`/accounts/${address}/fee-rate`));
+    const data = res?.data ?? res ?? {};
+    const makerFee = parseFloat(data.makerFee ?? data.maker_fee ?? data.maker);
+    const takerFee = parseFloat(data.takerFee ?? data.taker_fee ?? data.taker);
+    if (isNaN(makerFee) || isNaN(takerFee) || makerFee < 0 || takerFee < 0) {
+      throw new Error('Invalid fee rate response');
+    }
+    return { makerFee, takerFee };
+  } catch {
+    // Fallback to default rates
+    return market === 'spot' ? { ...DEFAULT_FEE_RATES.spot } : { ...DEFAULT_FEE_RATES.perps };
+  }
+}
+
 // ---------- Utility ----------
 
 export async function fetchAccountOrders(

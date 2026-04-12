@@ -8,7 +8,8 @@ import { StatCard } from '../components/common/Card';
 import { Input, Select } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { useSettingsStore } from '../store/settingsStore';
-import { placeOrder, fetchBookTickers } from '../api/services';
+import { placeOrder, fetchBookTickers, fetchFeeRate } from '../api/services';
+import type { FeeRateInfo } from '../api/services';
 
 interface TwapLog {
   time: string;
@@ -22,6 +23,7 @@ export const TwapBot: React.FC = () => {
   const { confirmOrders } = useSettingsStore();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const runningRef = useRef(false);
+  const feeRateRef = useRef<FeeRateInfo>({ makerFee: 0.00035, takerFee: 0.00065 });
 
   const [symbol, setSymbol] = useState('BTC-USDC');
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
@@ -68,9 +70,7 @@ export const TwapBot: React.FC = () => {
       );
 
       const vol = sliceAmount * fillPrice;
-      // SoDEX taker fee: Perps 0.040%, Spot 0.065%
-      const takerRate = isSpot ? 0.00065 : 0.0004;
-      const fee = vol * takerRate;
+      const fee = vol * feeRateRef.current.takerFee; // Market order = taker fee from API
 
       setExecutedSlices((p) => p + 1);
       setExecutedVolume((p) => p + vol);
@@ -116,8 +116,7 @@ export const TwapBot: React.FC = () => {
 
     const sliceAmount = total / numSlices;
     let currentSlice = 0;
-
-    addLog({ time: new Date().toLocaleTimeString(), message: `TWAP baslatildi: ${numSlices} slice, ${interval}s aralik` });
+    const market: 'spot' | 'perps' = isSpot ? 'spot' : 'perps';
 
     const runSlice = async () => {
       if (!runningRef.current || currentSlice >= numSlices) {
@@ -141,8 +140,17 @@ export const TwapBot: React.FC = () => {
       }
     };
 
-    runSlice();
-  }, [totalAmount, slices, intervalSec, executeSlice, addLog]);
+    // Fetch real fee rates from API before starting
+    (async () => {
+      const feeRate = await fetchFeeRate(market);
+      feeRateRef.current = feeRate;
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        message: `TWAP baslatildi: ${numSlices} slice, ${interval}s aralik — Fee: maker ${(feeRate.makerFee * 100).toFixed(4)}%, taker ${(feeRate.takerFee * 100).toFixed(4)}%`,
+      });
+      runSlice();
+    })();
+  }, [totalAmount, slices, intervalSec, isSpot, executeSlice, addLog]);
 
   const startBot = useCallback(() => {
     if (confirmOrders) {
