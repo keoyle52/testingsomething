@@ -9,6 +9,7 @@ import {
   fetchBookTickers,
   fetchOpenOrders,
   normalizeSymbol,
+  fetchSymbolTradingRules,
 } from '../api/services';
 import { getErrorMessage } from '../lib/utils';
 import { NumberDisplay } from '../components/common/NumberDisplay';
@@ -65,13 +66,26 @@ export const GridBot: React.FC = () => {
       const market: 'spot' | 'perps' = s.isSpot ? 'spot' : 'perps';
 
       try {
+        // Fetch symbol trading rules (cached in services.ts — no extra API cost)
+        const rules = await fetchSymbolTradingRules(s.symbol, market);
+
+        // Round quantity to stepSize
+        const rawQty = parseFloat(s.amountPerGrid);
+        if (isNaN(rawQty) || rawQty <= 0) throw new Error('Geçersiz miktar');
+        const steppedQty = Math.floor(rawQty / rules.stepSize) * rules.stepSize;
+        const quantityStr = steppedQty.toFixed(rules.quantityPrecision);
+
+        // Round price to tickSize
+        const tickedPrice = Math.floor(price / rules.tickSize) * rules.tickSize;
+        const priceStr = tickedPrice.toFixed(rules.pricePrecision);
+
         const result = await placeOrder(
           {
             symbol: s.symbol,
             side: side === 'BUY' ? 1 : 2,
             type: 1,
-            quantity: s.amountPerGrid,
-            price: price.toString(),
+            quantity: quantityStr,
+            price: priceStr,
             timeInForce: 1,
           },
           market,
@@ -80,7 +94,7 @@ export const GridBot: React.FC = () => {
         const res = result as Record<string, unknown> | undefined;
         const orderId: string | null = String(res?.orderID ?? res?.orderId ?? res?.id ?? '') || null;
         if (orderId) {
-          addLog({ message: `${side} LIMIT @ ${price.toFixed(2)} placed (${orderId})`, side });
+          addLog({ message: `${side} LIMIT @ ${priceStr} placed (${orderId})`, side });
         }
         return orderId;
       } catch (err: unknown) {
