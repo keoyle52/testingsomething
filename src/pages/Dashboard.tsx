@@ -62,7 +62,7 @@ export const Dashboard: React.FC = () => {
         const balancesArr = Array.isArray(rawBalances) ? rawBalances : [];
         let total = 0;
         for (const b of balancesArr) {
-          total += parseFloat(b.balance ?? b.available ?? b.totalBalance ?? 0);
+          total += parseFloat(b.total ?? b.balance ?? b.available ?? b.totalBalance ?? 0);
         }
         setBalance(total);
 
@@ -77,10 +77,12 @@ export const Dashboard: React.FC = () => {
 
         let pnl = 0;
         for (const pos of positionsArr) {
-          const size = Math.abs(parseFloat(pos.size ?? pos.quantity ?? 0));
-          const entryPrice = parseFloat(pos.entryPrice ?? pos.avgPrice ?? 0);
+          const rawSize = parseFloat(pos.size ?? pos.quantity ?? 0);
+          const size = Math.abs(rawSize);
+          const entryPrice = parseFloat(pos.avgEntryPrice ?? pos.entryPrice ?? pos.avgPrice ?? 0);
           const markPrice = priceMap[pos.symbol] ?? parseFloat(pos.markPrice ?? 0);
-          const side = pos.side === 1 || pos.side === 'BUY' || pos.side === 'LONG' ? 1 : -1;
+          // SoDEX position side is always BOTH: positive size = long, negative = short
+          const side = (pos.side === 1 || pos.side === 'BUY' || pos.side === 'LONG' || (pos.side !== 'SHORT' && rawSize >= 0)) ? 1 : -1;
           pnl += side * size * (markPrice - entryPrice);
         }
         setTotalPnl(pnl);

@@ -76,7 +76,7 @@ export const GridBot: React.FC = () => {
           market,
         );
 
-        const orderId: string | null = result?.orderId ?? result?.id ?? null;
+        const orderId: string | null = String(result?.orderID ?? result?.orderId ?? result?.id ?? '') || null;
         if (orderId) {
           addLog({ message: `${side} LIMIT @ ${price.toFixed(2)} placed (${orderId})`, side });
         }
@@ -126,7 +126,7 @@ export const GridBot: React.FC = () => {
       const openOrders = await fetchOpenOrders(market);
       const openOrderIds = new Set(
         (Array.isArray(openOrders) ? openOrders : []).map(
-          (o: any) => o.orderId ?? o.id,
+          (o: any) => String(o.orderID ?? o.orderId ?? o.id ?? ''),
         ),
       );
 

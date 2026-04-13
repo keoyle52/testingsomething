@@ -247,7 +247,18 @@ export async function fetchSpotSymbolID(symbol: string): Promise<number | null> 
 export async function fetchTickers(market: 'spot' | 'perps' = 'perps') {
   const client = getClient(market);
   const res: any = await withRetry(() => client.get('/markets/tickers'));
-  return res?.data ?? res ?? [];
+  const raw = res?.data ?? res ?? [];
+  const arr: any[] = Array.isArray(raw) ? raw : [];
+  // Normalize SoDEX field names to common aliases expected by consumers.
+  // API uses: lastPx, changePct, bidPx, askPx
+  return arr.map((t: any) => ({
+    ...t,
+    lastPrice: t.lastPx ?? t.lastPrice,
+    close: t.lastPx ?? t.close,
+    priceChangePercent: t.changePct ?? t.priceChangePercent,
+    bidPrice: t.bidPx ?? t.bidPrice,
+    askPrice: t.askPx ?? t.askPrice,
+  }));
 }
 
 export async function fetchMiniTickers(market: 'spot' | 'perps' = 'perps') {
@@ -259,7 +270,16 @@ export async function fetchMiniTickers(market: 'spot' | 'perps' = 'perps') {
 export async function fetchBookTickers(market: 'spot' | 'perps' = 'perps') {
   const client = getClient(market);
   const res: any = await withRetry(() => client.get('/markets/bookTickers'));
-  return res?.data ?? res ?? [];
+  const raw = res?.data ?? res ?? [];
+  const arr: any[] = Array.isArray(raw) ? raw : [];
+  // Normalize SoDEX field names: bidPx/askPx → bidPrice/askPrice/bid/ask
+  return arr.map((t: any) => ({
+    ...t,
+    bidPrice: t.bidPx ?? t.bidPrice,
+    askPrice: t.askPx ?? t.askPrice,
+    bid: t.bidPx ?? t.bid,
+    ask: t.askPx ?? t.ask,
+  }));
 }
 
 export async function fetchOrderbook(symbol: string, market: 'spot' | 'perps' = 'perps', limit = 20) {
@@ -278,7 +298,20 @@ export async function fetchKlines(
   const client = getClient(market);
   const sym = normalizeSymbol(symbol, market);
   const res: any = await withRetry(() => client.get(`/markets/${sym}/klines`, { params: { interval, limit } }));
-  return res?.data ?? res ?? [];
+  const raw = res?.data ?? res ?? [];
+  const arr: any[] = Array.isArray(raw) ? raw : [];
+  // SoDEX RPCKline uses single-char field names: t, o, h, l, c, v, q
+  // Normalize to common aliases expected by consumers.
+  return arr.map((k: any) => ({
+    ...k,
+    time: k.t ?? k.time ?? k.openTime,
+    openTime: k.t ?? k.openTime ?? k.time,
+    open: k.o ?? k.open,
+    high: k.h ?? k.high,
+    low: k.l ?? k.low,
+    close: k.c ?? k.close,
+    volume: k.v ?? k.volume,
+  }));
 }
 
 export async function fetchCoins(market: 'spot' | 'perps' = 'perps') {
@@ -312,14 +345,18 @@ export async function fetchBalances(market: 'spot' | 'perps' = 'perps') {
   if (!address) throw new Error('No wallet configured');
   const client = getClient(market);
   const res: any = await withRetry(() => client.get(`/accounts/${address}/balances`));
-  return res?.data ?? res ?? [];
+  // API returns { blockTime, blockHeight, balances: [...] } — unwrap the inner array.
+  const data = res?.data ?? res ?? {};
+  return Array.isArray(data) ? data : (data.balances ?? []);
 }
 
 export async function fetchPositions() {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const res: any = await withRetry(() => perpsClient.get(`/accounts/${address}/positions`));
-  return res?.data ?? res ?? [];
+  // API returns { blockTime, blockHeight, positions: [...] } — unwrap the inner array.
+  const data = res?.data ?? res ?? {};
+  return Array.isArray(data) ? data : (data.positions ?? []);
 }
 
 export async function fetchOpenOrders(market: 'spot' | 'perps' = 'perps') {
@@ -327,7 +364,9 @@ export async function fetchOpenOrders(market: 'spot' | 'perps' = 'perps') {
   if (!address) throw new Error('No wallet configured');
   const client = getClient(market);
   const res: any = await withRetry(() => client.get(`/accounts/${address}/orders`));
-  return res?.data ?? res ?? [];
+  // API returns { blockTime, blockHeight, orders: [...] } — unwrap the inner array.
+  const data = res?.data ?? res ?? {};
+  return Array.isArray(data) ? data : (data.orders ?? []);
 }
 
 // ---------- Trade (Private) ----------
@@ -561,11 +600,14 @@ export async function cancelAllOrders(symbol?: string, market: 'spot' | 'perps' 
   const normalizedFilter = symbol ? normalizeSymbol(symbol, market) : undefined;
   for (const order of ordersArray) {
     if (normalizedFilter && order.symbol !== normalizedFilter) continue;
+    // API returns orderID (uint64); fall back to orderId/id for backwards compat.
+    const orderId = String(order.orderID ?? order.orderId ?? order.id ?? '');
+    if (orderId === '') continue;
     try {
-      const r = await cancelOrder(order.orderId ?? order.id, order.symbol, market);
+      const r = await cancelOrder(orderId, order.symbol, market);
       results.push(r);
     } catch (e) {
-      results.push({ error: e, orderId: order.orderId ?? order.id });
+      results.push({ error: e, orderId });
     }
   }
   return results;
@@ -626,7 +668,9 @@ export async function fetchAccountOrders(
   if (!addr) throw new Error('No wallet configured');
   const client = getClient(market);
   const res: any = await withRetry(() => client.get(`/accounts/${addr}/orders`));
-  return res?.data ?? res ?? [];
+  // API returns { blockTime, blockHeight, orders: [...] } — unwrap the inner array.
+  const data = res?.data ?? res ?? {};
+  return Array.isArray(data) ? data : (data.orders ?? []);
 }
 
 // ---------- Order Status & Fill Verification ----------

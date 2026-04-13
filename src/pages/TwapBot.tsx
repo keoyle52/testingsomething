@@ -8,7 +8,7 @@ import { StatCard } from '../components/common/Card';
 import { Input, Select } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { useSettingsStore } from '../store/settingsStore';
-import { placeOrder, fetchBookTickers, fetchFeeRate } from '../api/services';
+import { placeOrder, fetchBookTickers, fetchFeeRate, normalizeSymbol } from '../api/services';
 import type { FeeRateInfo } from '../api/services';
 
 interface TwapLog {
@@ -53,7 +53,8 @@ export const TwapBot: React.FC = () => {
     try {
       const tickers = await fetchBookTickers(market);
       const arr = Array.isArray(tickers) ? tickers : [];
-      const ticker = arr.find((t: any) => t.symbol === symbol);
+      const normalizedSym = normalizeSymbol(symbol, market);
+      const ticker = arr.find((t: any) => t.symbol === normalizedSym);
 
       const bidPrice = parseFloat(ticker?.bidPrice ?? ticker?.bid ?? '0');
       const askPrice = parseFloat(ticker?.askPrice ?? ticker?.ask ?? '0');

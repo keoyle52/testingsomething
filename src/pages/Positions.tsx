@@ -56,21 +56,23 @@ export const Positions: React.FC = () => {
       const balancesArr = Array.isArray(rawBalances) ? rawBalances : [];
       let totalBalance = 0;
       for (const b of balancesArr) {
-        totalBalance += parseFloat(b.balance ?? b.available ?? b.totalBalance ?? 0);
+        totalBalance += parseFloat(b.total ?? b.balance ?? b.available ?? b.totalBalance ?? 0);
       }
       setMarginBalance(totalBalance);
 
       const positionsArr = Array.isArray(rawPositions) ? rawPositions : [];
       const mapped: PositionRow[] = positionsArr.map((pos: any) => {
-        const size = Math.abs(parseFloat(pos.size ?? pos.quantity ?? 0));
-        const entryPrice = parseFloat(pos.entryPrice ?? pos.avgPrice ?? 0);
+        const rawSize = parseFloat(pos.size ?? pos.quantity ?? 0);
+        const size = Math.abs(rawSize);
+        const entryPrice = parseFloat(pos.avgEntryPrice ?? pos.entryPrice ?? pos.avgPrice ?? 0);
         const symbol = pos.symbol ?? '';
         const markPrice = priceMap[symbol] ?? parseFloat(pos.markPrice ?? 0);
         const liquidationPrice = parseFloat(pos.liquidationPrice ?? pos.liqPrice ?? 0);
-        const margin = parseFloat(pos.margin ?? pos.initialMargin ?? 0);
+        const margin = parseFloat(pos.initialMargin ?? pos.margin ?? 0);
         const leverage = parseFloat(pos.leverage ?? 0);
 
-        const side = pos.side === 1 || pos.side === 'BUY' || pos.side === 'LONG'
+        // SoDEX: position side is always BOTH. Positive size = LONG, negative = SHORT.
+        const side = (pos.side === 'LONG' || (pos.side !== 'SHORT' && rawSize >= 0))
           ? 'LONG' : 'SHORT';
 
         const direction = side === 'LONG' ? 1 : -1;

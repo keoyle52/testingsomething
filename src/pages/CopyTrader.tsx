@@ -27,6 +27,7 @@ interface CopyLog {
 }
 
 interface TargetOrder {
+  orderID?: number;
   orderId?: string;
   id?: string;
   symbol: string;
@@ -40,7 +41,7 @@ interface TargetOrder {
 }
 
 function getOrderId(order: TargetOrder): string {
-  return order.orderId ?? order.id ?? '';
+  return String(order.orderID ?? order.orderId ?? order.id ?? '');
 }
 
 const POLL_INTERVAL = 5000;
