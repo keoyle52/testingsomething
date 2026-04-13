@@ -6,6 +6,7 @@ import { useSettingsStore } from '../store/settingsStore';
 import {
   placeOrder,
   placeOrderWithSigner,
+  placeBatchOrders,
   fetchOrderbook,
   fetchFeeRate,
   normalizeSymbol,
@@ -194,7 +195,7 @@ export const VolumeBot: React.FC = () => {
     const hasBudget = budgetVal > 0;
     const normalizedSym = normalizeSymbol(s.symbol, market);
     const accountBSigner = getAccountBSigner();
-    const isDualAccount = !!accountBSigner;
+    const isDualAccount = s.mode === 'dual_account' && !!accountBSigner;
 
     if (!hasBudget) {
       runningRef.current = false;
@@ -424,52 +425,68 @@ export const VolumeBot: React.FC = () => {
           return;
         }
       } else {
-        // ========== SINGLE ACCOUNT GTX FALLBACK ==========
-        // Uses GTX for maker fees but STP may block self-matching.
+        // ========== SINGLE ACCOUNT — MAKER PING-PONG ==========
+        // Place BUY GTC just above best bid and SELL GTC just below best ask.
+        // Orders rest in the book as maker; other participants fill them.
+        // No STP risk since BUY and SELL prices don't cross each other.
+        const tickSize = rules.tickSize > 0 ? rules.tickSize : 0.01;
+        const tickOffsetVal = Math.max(1, parseInt(s.tickOffset) || 1);
+        const fillWaitMs = Math.max(1000, parseInt(s.fillWaitMs) || 30000);
+        const buyPrice = (bidPrice + tickSize * tickOffsetVal).toFixed(pricePrecision);
+        const sellPrice = (askPrice - tickSize * tickOffsetVal).toFixed(pricePrecision);
+
+        // Ensure buy < sell to avoid self-crossing
+        if (parseFloat(buyPrice) >= parseFloat(sellPrice)) {
+          s.addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `[${market.toUpperCase()}] ${normalizedSym}: Spread çok dar (buy=${buyPrice} >= sell=${sellPrice}). Atlanıyor.`,
+          });
+          return;
+        }
+
         s.addLog({
           time: new Date().toLocaleTimeString(),
-          message: `[${market.toUpperCase()}] ${normalizedSym}: [TEK HESAP] BUY GTX @ ${midPriceStr} + SELL GTX @ ${midPriceStr} qty=${qty} — ⚠️ STP riski var (Account B ayarlanmamış)`,
+          message: `[${market.toUpperCase()}] ${normalizedSym}: [TEK HESAP] BUY GTC @ ${buyPrice} + SELL GTC @ ${sellPrice} qty=${qty} (maker ping-pong)`,
         });
 
-        const buyResult = await placeOrder(
-          { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: midPriceStr, timeInForce: 4 },
+        // Send both orders in a single batch for atomicity and rate-limit efficiency
+        const batchResults = await placeBatchOrders(
+          [
+            { symbol: s.symbol, side: 1, type: 1, quantity: qty, price: buyPrice, timeInForce: 1 /* GTC */ },
+            { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: sellPrice, timeInForce: 1 /* GTC */ },
+          ],
           market,
         );
 
-        const buyRes = buyResult as Record<string, unknown> | undefined;
+        const buyRes = (batchResults[0] ?? {}) as Record<string, unknown>;
+        const sellRes = (batchResults[1] ?? {}) as Record<string, unknown>;
         const buyOrderId: string = String(buyRes?.orderID ?? buyRes?.orderId ?? buyRes?.id ?? '');
-
-        // Wait for BUY to rest in book
-        await new Promise((r) => setTimeout(r, FILL_VERIFICATION_DELAY_MS));
-
-        const sellResult = await placeOrder(
-          { symbol: s.symbol, side: 2, type: 1, quantity: qty, price: midPriceStr, timeInForce: 4 },
-          market,
-        );
-
-        const sellRes = sellResult as Record<string, unknown> | undefined;
         const sellOrderId: string = String(sellRes?.orderID ?? sellRes?.orderId ?? sellRes?.id ?? '');
 
         s.addLog({
           time: new Date().toLocaleTimeString(),
-          message: `[${market.toUpperCase()}] BUY orderId=${buyOrderId || 'N/A'} SELL orderId=${sellOrderId || 'N/A'} — fill doğrulanıyor…`,
+          message: `[${market.toUpperCase()}] BUY orderId=${buyOrderId || 'N/A'} SELL orderId=${sellOrderId || 'N/A'} — ${fillWaitMs}ms fill bekleniyor…`,
         });
 
-        await new Promise((r) => setTimeout(r, FILL_VERIFICATION_DELAY_MS));
+        // Wait for fills (GTC orders may take time for other users to fill)
+        await new Promise((r) => setTimeout(r, fillWaitMs));
 
-        let buyFill = extractInlineFill(buyResult);
+        if (!runningRef.current) return; // bot may have been stopped while waiting
+
+        // Check fill status
+        let buyFill = extractInlineFill(batchResults[0]);
         if (!buyFill && buyOrderId) {
           const st = await fetchOrderStatus(buyOrderId, s.symbol, market);
           if (st) buyFill = { filledQty: st.filledQty, avgFillPrice: st.avgFillPrice, status: st.status, totalFee: st.totalFee };
         }
 
-        let sellFill = extractInlineFill(sellResult);
+        let sellFill = extractInlineFill(batchResults[1]);
         if (!sellFill && sellOrderId) {
           const st = await fetchOrderStatus(sellOrderId, s.symbol, market);
           if (st) sellFill = { filledQty: st.filledQty, avgFillPrice: st.avgFillPrice, status: st.status, totalFee: st.totalFee };
         }
 
-        // Cleanup unfilled GTX orders
+        // Cancel unfilled orders (they've waited long enough)
         const ordersToCancelA: string[] = [];
         if ((buyFill?.filledQty ?? 0) === 0 && buyOrderId) ordersToCancelA.push(buyOrderId);
         if ((sellFill?.filledQty ?? 0) === 0 && sellOrderId) ordersToCancelA.push(sellOrderId);
@@ -478,22 +495,23 @@ export const VolumeBot: React.FC = () => {
         }
 
         if (!buyFill && !sellFill) {
+          // No fills — not an STP error, just no liquidity took our orders
           consecutiveUnverifiedRef.current += 1;
           consecutiveSuccessRef.current = 0;
           s.addLog({
             time: new Date().toLocaleTimeString(),
-            message: `[${market.toUpperCase()}] ${normalizedSym}: Fill doğrulanamadı — STP muhtemel. Account B tanımlayın. (${consecutiveUnverifiedRef.current}/${MAX_CONSECUTIVE_UNVERIFIED})`,
+            message: `[${market.toUpperCase()}] ${normalizedSym}: Fill doğrulanamadı — emirler dolmadı (${fillWaitMs}ms). (${consecutiveUnverifiedRef.current}/${MAX_CONSECUTIVE_UNVERIFIED})`,
           });
           if (consecutiveUnverifiedRef.current >= MAX_CONSECUTIVE_UNVERIFIED) {
             runningRef.current = false;
             s.setField('status', 'STOPPED');
-            s.addLog({ time: new Date().toLocaleTimeString(), message: `${MAX_CONSECUTIVE_UNVERIFIED} ardışık doğrulanamaz — bot durduruldu. Account B ayarlayın.` });
+            s.addLog({ time: new Date().toLocaleTimeString(), message: `${MAX_CONSECUTIVE_UNVERIFIED} ardışık fill'siz — bot durduruldu. Tick offset veya bekleme süresini ayarlayın.` });
           }
           return;
         }
 
-        const buyVol = (buyFill?.filledQty ?? 0) * (buyFill?.avgFillPrice ?? midPrice);
-        const sellVol = (sellFill?.filledQty ?? 0) * (sellFill?.avgFillPrice ?? midPrice);
+        const buyVol = (buyFill?.filledQty ?? 0) * (buyFill?.avgFillPrice ?? parseFloat(buyPrice));
+        const sellVol = (sellFill?.filledQty ?? 0) * (sellFill?.avgFillPrice ?? parseFloat(sellPrice));
         const totalFillVol = buyVol + sellVol;
 
         if (totalFillVol <= 0) {
@@ -501,7 +519,7 @@ export const VolumeBot: React.FC = () => {
           consecutiveSuccessRef.current = 0;
           s.addLog({
             time: new Date().toLocaleTimeString(),
-            message: `[${market.toUpperCase()}] ${normalizedSym}: Fill yok — STP. (${consecutiveUnverifiedRef.current}/${MAX_CONSECUTIVE_UNVERIFIED})`,
+            message: `[${market.toUpperCase()}] ${normalizedSym}: Fill yok. (${consecutiveUnverifiedRef.current}/${MAX_CONSECUTIVE_UNVERIFIED})`,
           });
           if (consecutiveUnverifiedRef.current >= MAX_CONSECUTIVE_UNVERIFIED) {
             runningRef.current = false;
@@ -548,7 +566,7 @@ export const VolumeBot: React.FC = () => {
           price: midPrice,
           fee,
           orderId: `${buyOrderId || 'N/A'} / ${sellOrderId || 'N/A'}`,
-          message: `[${market.toUpperCase()}] [TEK] Fill: BUY ${filledQtyBuy.toFixed(8)} SELL ${filledQtySell.toFixed(8)} → $${totalFillVol.toFixed(4)} (STP uyarısı)`,
+          message: `[${market.toUpperCase()}] [TEK] Fill: BUY ${filledQtyBuy.toFixed(8)}@${buyPrice} SELL ${filledQtySell.toFixed(8)}@${sellPrice} → $${totalFillVol.toFixed(4)}`,
         });
 
         if (maxVolLimit !== null && nextTotalVolume >= maxVolLimit) {
@@ -578,7 +596,14 @@ export const VolumeBot: React.FC = () => {
         consecutiveSuccessRef.current = 0;
       }
 
-      s2.addLog({ time: new Date().toLocaleTimeString(), message: `[${market.toUpperCase()}] HATA: ${category}` });
+      // STP errors should NOT increment the unverified counter — they are expected
+      // in certain configurations and are not connection/verification failures.
+      if (category.includes('SELF-TRADE PREVENTION')) {
+        s2.addLog({ time: new Date().toLocaleTimeString(), message: `[${market.toUpperCase()}] STP engeli — bu beklenen bir durum, sayaç sıfırlanmadı.` });
+      } else {
+        s2.addLog({ time: new Date().toLocaleTimeString(), message: `[${market.toUpperCase()}] HATA: ${category}` });
+      }
+
       toast.error(`Volume Bot: ${category}`);
     }
   }, [getAccountBSigner]);
@@ -608,6 +633,7 @@ export const VolumeBot: React.FC = () => {
 
     const market = state.isSpot ? 'spot' : 'perps';
     const accountBSigner = getAccountBSigner();
+    const isDualMode = state.mode === 'dual_account' && !!accountBSigner;
 
     (async () => {
       if (market === 'perps') {
@@ -626,8 +652,8 @@ export const VolumeBot: React.FC = () => {
           });
         }
 
-        // Set leverage for Account B if configured
-        if (accountBSigner) {
+        // Set leverage for Account B if dual mode
+        if (isDualMode && accountBSigner) {
           try {
             await updatePerpsLeverageForAddress(state.symbol, PERPS_LEVERAGE, PERPS_MARGIN_MODE_CROSS, accountBSigner);
             state.addLog({
@@ -649,15 +675,16 @@ export const VolumeBot: React.FC = () => {
       feeRateRef.current = feeRate;
 
       const isRebate = feeRate.makerFee < 0;
+      const modeLabel = isDualMode ? 'DUAL HESAP (GTX)' : 'TEK HESAP (Maker Ping-Pong)';
       state.addLog({
         time: new Date().toLocaleTimeString(),
-        message: `Bot başlatıldı — Mod: ${accountBSigner ? 'DUAL HESAP (GTX)' : 'TEK HESAP (GTX + STP uyarısı)'} | Fee (${market}): maker ${(feeRate.makerFee * 100).toFixed(4)}%, taker ${(feeRate.takerFee * 100).toFixed(4)}%${isRebate ? ' 🎉 REBATE AKTİF!' : ''}`,
+        message: `Bot başlatıldı — Mod: ${modeLabel} | Fee (${market}): maker ${(feeRate.makerFee * 100).toFixed(4)}%, taker ${(feeRate.takerFee * 100).toFixed(4)}%${isRebate ? ' 🎉 REBATE AKTİF!' : ''}`,
       });
 
-      if (!accountBSigner) {
+      if (state.mode === 'dual_account' && !accountBSigner) {
         state.addLog({
           time: new Date().toLocaleTimeString(),
-          message: '⚠️ Account B tanımlı değil. Tek hesap modunda STP self-trade engelleyebilir. Settings > Account B alanlarını doldurun.',
+          message: '⚠️ Dual hesap modu seçili ama Account B tanımlı değil. Tek hesap stratejisine düşülüyor.',
         });
       }
 
@@ -704,12 +731,13 @@ export const VolumeBot: React.FC = () => {
     : (state.totalVolume > 0 ? (state.totalVolume / ESTIMATED_PLATFORM_VOLUME) * 100 : 0);
   const rebateRemaining = Math.max(0, REBATE_THRESHOLD_SHARE * 100 - estimatedMakerShare);
   const hasAccountB = !!(settings.accountBApiKeyName && settings.accountBPrivateKey);
+  const isSingleMode = state.mode === 'single_account';
   return (
     <div className="flex h-[calc(100vh-52px)]">
       <ConfirmModal
         isOpen={showConfirm}
         title="Volume Bot'u Başlat"
-        message={`Volume Bot başlatılacak.\nMod: ${hasAccountB ? 'Dual Hesap (GTX)' : 'Tek Hesap (GTX + STP uyarısı)'}\nPiyasa: ${state.isSpot ? 'Spot' : 'Perps'}${!state.isSpot ? `\nKaldıraç: ${PERPS_LEVERAGE}x (otomatik)` : ''}\nKullanılacak bütçe: $${state.budget || '0'}\nHarcanacak bütçe: $${state.maxSpend || '0'}\nHedef hacim: $${state.maxVolumeTarget || '0'}`}
+        message={`Volume Bot başlatılacak.\nMod: ${state.mode === 'dual_account' && hasAccountB ? 'Dual Hesap (GTX)' : 'Tek Hesap (Maker Ping-Pong)'}\nPiyasa: ${state.isSpot ? 'Spot' : 'Perps'}${!state.isSpot ? `\nKaldıraç: ${PERPS_LEVERAGE}x (otomatik)` : ''}\nKullanılacak bütçe: $${state.budget || '0'}\nHarcanacak bütçe: $${state.maxSpend || '0'}\nHedef hacim: $${state.maxVolumeTarget || '0'}${isSingleMode ? `\nTick Offset: ${state.tickOffset}\nFill Bekleme: ${state.fillWaitMs}ms` : ''}`}
         onConfirm={doStart}
         onCancel={() => setShowConfirm(false)}
       />
@@ -720,6 +748,16 @@ export const VolumeBot: React.FC = () => {
           <h2 className="font-semibold text-sm">Ayarlar</h2>
           <StatusBadge status={state.status} />
         </div>
+
+        <Select
+          label="Mod"
+          value={state.mode}
+          options={[
+            { value: 'single_account', label: 'Tek Hesap (Maker Ping-Pong)' },
+            { value: 'dual_account', label: 'Dual Hesap (GTX Cross)' },
+          ]}
+          onChange={(e) => state.setField('mode', e.target.value as 'dual_account' | 'single_account')}
+        />
 
         <Select
           label="Piyasa"
@@ -770,41 +808,68 @@ export const VolumeBot: React.FC = () => {
           hint="0 = limitsiz"
         />
 
-        {/* Account B Settings */}
-        <div className="pt-3 border-t border-border">
-          <div className="flex items-center gap-2 mb-3">
-            <h3 className="text-[11px] font-medium text-text-secondary uppercase tracking-wider">Account B (Karşı Taraf)</h3>
-            {hasAccountB ? (
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-success/10 text-success font-medium">Aktif</span>
-            ) : (
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-warning/10 text-warning font-medium">Yok</span>
-            )}
+        {/* Single Account Mode Settings */}
+        {isSingleMode && (
+          <div className="pt-3 border-t border-border">
+            <h3 className="text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-3">Maker Ping-Pong Ayarları</h3>
+            <div className="flex flex-col gap-3">
+              <Input
+                label="Tick Offset"
+                type="number"
+                value={state.tickOffset}
+                onChange={(e) => state.setField('tickOffset', e.target.value)}
+                placeholder="1"
+                hint="Spread içine kaç tick girilsin (varsayılan: 1)"
+              />
+              <Input
+                label="Fill Bekleme Süresi (ms)"
+                type="number"
+                value={state.fillWaitMs}
+                onChange={(e) => state.setField('fillWaitMs', e.target.value)}
+                placeholder="30000"
+                hint="Emirlerin dolmasını bekleme süresi (varsayılan: 30sn)"
+              />
+            </div>
           </div>
-          <div className="flex flex-col gap-3">
-            <Input
-              label="Account B API Key"
-              type="text"
-              value={settings.accountBApiKeyName}
-              onChange={(e) => settings.setAccountBApiKeyName(e.target.value)}
-              placeholder="account-b-key"
-            />
-            <Input
-              label="Account B Private Key"
-              type="password"
-              value={settings.accountBPrivateKey}
-              onChange={(e) => settings.setAccountBPrivateKey(e.target.value)}
-              placeholder="0x..."
-            />
-            <Input
-              label="Account B EVM Adresi"
-              type="text"
-              value={settings.accountBAddress}
-              onChange={(e) => settings.setAccountBAddress(e.target.value)}
-              placeholder="0x... (boş bırakılırsa PK'dan türetilir)"
-              hint="Opsiyonel — private key'den otomatik türetilir"
-            />
+        )}
+
+        {/* Account B Settings — only shown in dual account mode */}
+        {!isSingleMode && (
+          <div className="pt-3 border-t border-border">
+            <div className="flex items-center gap-2 mb-3">
+              <h3 className="text-[11px] font-medium text-text-secondary uppercase tracking-wider">Account B (Karşı Taraf)</h3>
+              {hasAccountB ? (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-success/10 text-success font-medium">Aktif</span>
+              ) : (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-warning/10 text-warning font-medium">Yok</span>
+              )}
+            </div>
+            <div className="flex flex-col gap-3">
+              <Input
+                label="Account B API Key"
+                type="text"
+                value={settings.accountBApiKeyName}
+                onChange={(e) => settings.setAccountBApiKeyName(e.target.value)}
+                placeholder="account-b-key"
+              />
+              <Input
+                label="Account B Private Key"
+                type="password"
+                value={settings.accountBPrivateKey}
+                onChange={(e) => settings.setAccountBPrivateKey(e.target.value)}
+                placeholder="0x..."
+              />
+              <Input
+                label="Account B EVM Adresi"
+                type="text"
+                value={settings.accountBAddress}
+                onChange={(e) => settings.setAccountBAddress(e.target.value)}
+                placeholder="0x... (boş bırakılırsa PK'dan türetilir)"
+                hint="Opsiyonel — private key'den otomatik türetilir"
+              />
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="mt-auto pt-4 border-t border-border">
           {state.status !== 'RUNNING' ? (

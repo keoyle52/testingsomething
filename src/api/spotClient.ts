@@ -20,7 +20,7 @@ spotClient.interceptors.request.use(async (config) => {
     const payload = config.data || {};
     const actionType = deriveActionType(method, config.url ?? '');
     try {
-      const { signature, nonce } = await signPayload(actionType, payload, privateKey, 'spot', isTestnet);
+      const { signature, nonce } = await signPayload(actionType, payload, privateKey, 'spot', isTestnet, apiKeyName);
       config.headers['X-API-Key'] = apiKeyName;
       config.headers['X-API-Nonce'] = nonce;
       config.headers['X-API-Sign'] = signature;

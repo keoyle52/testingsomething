@@ -19,16 +19,25 @@ export const EIP712_TYPES = {
 };
 
 /**
- * Monotonic nonce generator.
- * Guarantees a strictly increasing nonce even when multiple requests are
- * dispatched within the same millisecond, preventing nonce-collision
- * signature rejections from the exchange.
+ * Per-API-key monotonic nonce generator.
+ * SoDEX tracks nonces per API key (i.e. per signing private key).  When
+ * multiple accounts share the same process they must use separate nonce
+ * counters to avoid collisions.  Each key gets its own strictly-increasing
+ * counter initialised from the current wall-clock millisecond timestamp.
  */
-let _lastNonce = BigInt(0);
-export function getMonotonicNonce(): string {
+const _nonceMap = new Map<string, bigint>();
+
+/**
+ * Return a strictly increasing nonce for the given API key.
+ * If no key is provided a shared default counter is used (backward-compat).
+ */
+export function getMonotonicNonce(apiKey?: string): string {
+  const key = apiKey ?? '__default__';
   const now = BigInt(Date.now());
-  _lastNonce = now > _lastNonce ? now : _lastNonce + BigInt(1);
-  return _lastNonce.toString();
+  const last = _nonceMap.get(key) ?? BigInt(0);
+  const next = now > last ? now : last + BigInt(1);
+  _nonceMap.set(key, next);
+  return next.toString();
 }
 
 /**
@@ -66,10 +75,11 @@ export async function signPayload(
   payload: Record<string, unknown>,
   privateKey: string,
   type: DomainType,
-  isTestnet: boolean
+  isTestnet: boolean,
+  apiKey?: string,
 ): Promise<{ signature: string; nonce: string }> {
   const wallet = new ethers.Wallet(privateKey);
-  const nonce = getMonotonicNonce();
+  const nonce = getMonotonicNonce(apiKey ?? wallet.address);
 
   // Wrap in the {type, params} envelope required by Sodex before hashing.
   // JSON.stringify without replacer/indent preserves insertion order of

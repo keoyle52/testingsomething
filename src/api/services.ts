@@ -507,6 +507,117 @@ export async function placeOrder(params: PlaceOrderParams, market: 'spot' | 'per
 }
 
 /**
+ * Place multiple orders in a single atomic batch request.
+ * Returns the full batch response (array of per-order results).
+ *
+ * This is more efficient than calling placeOrder N times because:
+ * - Single HTTP round-trip (lower latency, lower rate-limit cost)
+ * - Atomic submission — all orders hit the matching engine together
+ */
+export async function placeBatchOrders(
+  ordersList: PlaceOrderParams[],
+  market: 'spot' | 'perps',
+): Promise<unknown[]> {
+  if (ordersList.length === 0) return [];
+
+  // All orders in a batch must share the same symbol
+  const symbol = ordersList[0].symbol;
+
+  if (market === 'spot') {
+    const [accountState, symbolEntry] = await Promise.all([
+      fetchSpotAccountState(),
+      fetchSymbolEntry(symbol, 'spot'),
+    ]);
+
+    const symbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
+    if (symbolID == null) {
+      throw new Error(`placeBatchOrders: symbolID not found for symbol "${symbol}"`);
+    }
+
+    const { pricePrecision, tickSize, quantityPrecision, stepSize } = extractPrecision(symbolEntry);
+
+    const orders = ordersList.map((params) => {
+      const timeInForce = params.timeInForce ?? (params.type === 2 ? 3 : 1);
+      const rawQty = parseFloat(params.quantity);
+      const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
+      const price = params.price !== undefined
+        ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
+        : undefined;
+
+      // BatchNewOrderItem in Go struct field order
+      const orderItem: Record<string, unknown> = {
+        symbolID,
+        clOrdID: generateClOrdID(),
+        side: params.side,
+        type: params.type,
+        timeInForce,
+      };
+      if (price !== undefined) orderItem.price = price;
+      orderItem.quantity = quantity;
+      return orderItem;
+    });
+
+    const payload = {
+      accountID: accountState.accountID,
+      orders,
+    };
+
+    const res = await withRetry(() => spotClient.post('/trade/orders/batch', payload));
+    const data = res?.data ?? res ?? {};
+    assertNoBodyError(data);
+    return Array.isArray(data) ? data : [data];
+  } else {
+    // Perps
+    const [accountState, symbolEntry] = await Promise.all([
+      fetchPerpsAccountState(),
+      fetchSymbolEntry(symbol, 'perps'),
+    ]);
+
+    const symbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
+    if (symbolID == null) {
+      throw new Error(`placeBatchOrders: symbolID not found for symbol "${symbol}"`);
+    }
+
+    const { pricePrecision, tickSize, quantityPrecision, stepSize } = extractPrecision(symbolEntry);
+
+    const orders = ordersList.map((params) => {
+      const timeInForce = params.timeInForce ?? (params.type === 2 ? 3 : 1);
+      const rawQty = parseFloat(params.quantity);
+      const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
+      const price = params.price !== undefined
+        ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
+        : undefined;
+
+      // PerpsOrderItem in Go struct field order
+      const order: Record<string, unknown> = {
+        clOrdID: generateClOrdID(),
+        modifier: 1,
+        side: params.side,
+        type: params.type,
+        timeInForce,
+      };
+      if (price !== undefined) order.price = price;
+      order.quantity = quantity;
+      order.reduceOnly = false;
+      order.positionSide = 1;
+      return order;
+    });
+
+    const payload = {
+      accountID: accountState.accountID,
+      symbolID,
+      orders,
+    };
+
+    const res = await withRetry(() => perpsClient.post('/trade/orders', payload));
+    const data = res?.data ?? res ?? {};
+    assertNoBodyError(data);
+    const resultArray = Array.isArray(data) ? data : (Array.isArray(data?.orders) ? data.orders : [data]);
+    return resultArray;
+  }
+}
+
+/**
  * Update perps leverage/margin mode for a symbol.
  * marginMode: 1=ISOLATED, 2=CROSS
  */
@@ -835,7 +946,7 @@ async function signedPost(
   const domainType = market === 'spot' ? 'spot' : 'futures';
   const actionType = deriveActionType('POST', url);
 
-  const { signature, nonce } = await signPayload(actionType, payload, signer.privateKey, domainType, isTestnet);
+  const { signature, nonce } = await signPayload(actionType, payload, signer.privateKey, domainType, isTestnet, signer.apiKeyName);
 
   const res = await axios.post(`${baseURL}${url}`, payload, {
     headers: {
@@ -865,7 +976,7 @@ async function signedDelete(
   const domainType = market === 'spot' ? 'spot' : 'futures';
   const actionType = deriveActionType('DELETE', url);
 
-  const { signature, nonce } = await signPayload(actionType, payload, signer.privateKey, domainType, isTestnet);
+  const { signature, nonce } = await signPayload(actionType, payload, signer.privateKey, domainType, isTestnet, signer.apiKeyName);
 
   const res = await axios.delete(`${baseURL}${url}`, {
     data: payload,

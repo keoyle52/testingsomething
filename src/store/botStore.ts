@@ -22,6 +22,9 @@ interface VolumeBotState {
   leverage: string;
   budget: string;
   maxSpend: string;
+  mode: 'dual_account' | 'single_account';
+  tickOffset: string;
+  fillWaitMs: string;
   status: 'STOPPED' | 'RUNNING' | 'ERROR';
   totalVolume: number;
   tradesCount: number;
@@ -68,6 +71,9 @@ export const useBotStore = create<BotStoreState>((set) => ({
     leverage: '1',
     budget: '0',
     maxSpend: '0',
+    mode: 'single_account',
+    tickOffset: '1',
+    fillWaitMs: '30000',
     status: 'STOPPED',
     totalVolume: 0,
     tradesCount: 0,
