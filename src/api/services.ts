@@ -1,9 +1,7 @@
-import axios from 'axios';
 import { perpsClient } from './perpsClient';
 import { spotClient } from './spotClient';
 import { useSettingsStore } from '../store/settingsStore';
 import { ethers } from 'ethers';
-import { signPayload, deriveActionType } from './signer';
 
 // ---------- internal helpers ----------
 
@@ -32,6 +30,14 @@ function generateClOrdID(): string {
   const ts = Date.now().toString(36);
   return `${ts}-${seq}`.slice(0, 36);
 }
+
+// Symbol cache — 60 second TTL
+const _symbolCache = new Map<string, { entry: Record<string, unknown>; ts: number }>();
+const SYMBOL_CACHE_TTL = 60_000;
+
+// AccountState cache — 30 second TTL
+const _accountStateCache = new Map<string, { state: { accountID: number | string; [key: string]: unknown }; ts: number }>();
+const ACCOUNT_STATE_CACHE_TTL = 30_000;
 
 // ---------- helpers ----------
 
@@ -152,15 +158,21 @@ function roundToTick(value: number, tickSize: number, precision: number): string
 /**
  * Look up the full symbol entry (including precision metadata) for a given
  * symbol on the specified market.  Returns null when not found.
+ * Results are cached for SYMBOL_CACHE_TTL ms to avoid redundant API calls.
  */
 async function fetchSymbolEntry(symbol: string, market: 'spot' | 'perps'): Promise<Record<string, unknown> | null> {
+  const cacheKey = `${market}:${symbol}`;
+  const cached = _symbolCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < SYMBOL_CACHE_TTL) return cached.entry;
   try {
     const symbols = await fetchSymbols(market);
     const list = Array.isArray(symbols) ? symbols : (symbols?.symbols ?? symbols?.data ?? []);
     const normalised = normalizeSymbol(symbol, market);
-    return list.find(
+    const entry = list.find(
       (s: Record<string, unknown>) => s.symbol === normalised || s.name === normalised || s.ticker === normalised,
     ) ?? null;
+    if (entry) _symbolCache.set(cacheKey, { entry, ts: Date.now() });
+    return entry;
   } catch {
     return null;
   }
@@ -204,34 +216,46 @@ export async function fetchPerpsSymbolID(symbol: string): Promise<number | null>
  * Fetch the perps account state for the current wallet.
  * Uses /state endpoint which returns WsPerpsState (aid = Account ID).
  * Returns an object containing at minimum `accountID`.
+ * Results are cached for ACCOUNT_STATE_CACHE_TTL ms.
  */
 export async function fetchPerpsAccountState(): Promise<{ accountID: number | string; [key: string]: unknown }> {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
+  const cacheKey = `perps:${address}`;
+  const cached = _accountStateCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ACCOUNT_STATE_CACHE_TTL) return cached.state;
   const res = await withRetry(() => perpsClient.get(`/accounts/${address}/state`));
   const data = res?.data ?? res ?? {};
   assertNoBodyError(data);
   // WsPerpsState uses `aid` for account ID; also try legacy field names
   const accountID = data.aid ?? data.accountID ?? data.accountId ?? data.account_id ?? data.id;
   if (accountID == null) throw new Error('fetchPerpsAccountState: accountID not found in response');
-  return { ...data, accountID };
+  const state = { ...data, accountID };
+  _accountStateCache.set(cacheKey, { state, ts: Date.now() });
+  return state;
 }
 
 /**
  * Fetch the spot account state for the current wallet.
  * Uses /state endpoint which returns WsSpotState (aid = Account ID).
  * Returns an object containing at minimum `accountID`.
+ * Results are cached for ACCOUNT_STATE_CACHE_TTL ms.
  */
 export async function fetchSpotAccountState(): Promise<{ accountID: number | string; [key: string]: unknown }> {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
+  const cacheKey = `spot:${address}`;
+  const cached = _accountStateCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ACCOUNT_STATE_CACHE_TTL) return cached.state;
   const res = await withRetry(() => spotClient.get(`/accounts/${address}/state`));
   const data = res?.data ?? res ?? {};
   assertNoBodyError(data);
   // WsSpotState uses `aid` for account ID; also try legacy field names
   const accountID = data.aid ?? data.accountID ?? data.accountId ?? data.account_id ?? data.id;
   if (accountID == null) throw new Error('fetchSpotAccountState: accountID not found in response');
-  return { ...data, accountID };
+  const state = { ...data, accountID };
+  _accountStateCache.set(cacheKey, { state, ts: Date.now() });
+  return state;
 }
 
 /**
@@ -852,7 +876,7 @@ export async function fetchOrderStatus(
     for (const t of matchingTrades) {
       const qty = parseFloat(t.quantity ?? '0') || 0;
       const price = parseFloat(t.price ?? '0') || 0;
-      const fee = parseFloat(t.fee ?? t.commission ?? '0') || 0;
+      const fee = parseFloat(String(t.feeAmt ?? t.fee ?? t.commission ?? t.totalFee ?? '0')) || 0;
       totalQty += qty;
       totalValue += qty * price;
       totalFee += fee;
@@ -871,6 +895,7 @@ export async function fetchOrderStatus(
     return null;
   }
 }
+
 
 /**
  * Fetch recent fills / trades for the current account.
@@ -893,197 +918,6 @@ export async function fetchAccountFills(
   }
 }
 
-// ---------- Account B / Signer Override Support ----------
-
-/**
- * Override credentials for signing requests with a different account (Account B).
- * When provided, the request bypasses the default interceptor signing and uses
- * these credentials instead.
- */
-export interface SignerOverride {
-  apiKeyName: string;
-  privateKey: string;
-  address: string;
-}
-
-/**
- * Resolve the EVM address from a private key string.
- */
-export function deriveEvmAddress(privateKey: string): string {
-  if (!privateKey) return '';
-  try {
-    let pk = privateKey;
-    if (!pk.startsWith('0x')) pk = '0x' + pk;
-    return new ethers.Wallet(pk).address;
-  } catch {
-    return '';
-  }
-}
-
-/**
- * Get the base URL for a specific market.
- */
-function getBaseURL(market: 'spot' | 'perps'): string {
-  const { isTestnet } = useSettingsStore.getState();
-  if (market === 'spot') {
-    return isTestnet ? 'https://testnet-gw.sodex.dev/api/v1/spot' : 'https://mainnet-gw.sodex.dev/api/v1/spot';
-  }
-  return isTestnet ? 'https://testnet-gw.sodex.dev/api/v1/perps' : 'https://mainnet-gw.sodex.dev/api/v1/perps';
-}
-
-/**
- * Make a signed POST request using custom signer credentials (Account B).
- * This bypasses the axios interceptor and signs the payload manually.
- */
-async function signedPost(
-  url: string,
-  payload: Record<string, unknown>,
-  market: 'spot' | 'perps',
-  signer: SignerOverride,
-): Promise<unknown> {
-  const { isTestnet } = useSettingsStore.getState();
-  const baseURL = getBaseURL(market);
-  const domainType = market === 'spot' ? 'spot' : 'futures';
-  const actionType = deriveActionType('POST', url);
-
-  const { signature, nonce } = await signPayload(actionType, payload, signer.privateKey, domainType, isTestnet, signer.apiKeyName);
-
-  const res = await axios.post(`${baseURL}${url}`, payload, {
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': signer.apiKeyName,
-      'X-API-Nonce': nonce,
-      'X-API-Sign': signature,
-    },
-  });
-
-  const data = res?.data ?? {};
-  assertNoBodyError(data);
-  return data;
-}
-
-/**
- * Make a signed DELETE request using custom signer credentials (Account B).
- */
-async function signedDelete(
-  url: string,
-  payload: Record<string, unknown>,
-  market: 'spot' | 'perps',
-  signer: SignerOverride,
-): Promise<unknown> {
-  const { isTestnet } = useSettingsStore.getState();
-  const baseURL = getBaseURL(market);
-  const domainType = market === 'spot' ? 'spot' : 'futures';
-  const actionType = deriveActionType('DELETE', url);
-
-  const { signature, nonce } = await signPayload(actionType, payload, signer.privateKey, domainType, isTestnet, signer.apiKeyName);
-
-  const res = await axios.delete(`${baseURL}${url}`, {
-    data: payload,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': signer.apiKeyName,
-      'X-API-Nonce': nonce,
-      'X-API-Sign': signature,
-    },
-  });
-
-  const data = res?.data ?? {};
-  assertNoBodyError(data);
-  return data;
-}
-
-/**
- * Fetch account state for a specific address (used for Account B).
- */
-export async function fetchAccountStateForAddress(
-  address: string,
-  market: 'spot' | 'perps',
-): Promise<{ accountID: number | string; [key: string]: unknown }> {
-  const client = getClient(market);
-  const res = await withRetry(() => client.get(`/accounts/${address}/state`));
-  const data = res?.data ?? res ?? {};
-  assertNoBodyError(data);
-  const accountID = data.aid ?? data.accountID ?? data.accountId ?? data.account_id ?? data.id;
-  if (accountID == null) throw new Error(`fetchAccountStateForAddress: accountID not found for ${address}`);
-  return { ...data, accountID };
-}
-
-/**
- * Place an order with a custom signer (Account B support).
- * This creates the order payload and signs it with the provided credentials
- * instead of the default account.
- */
-export async function placeOrderWithSigner(
-  params: PlaceOrderParams,
-  market: 'spot' | 'perps',
-  signer: SignerOverride,
-): Promise<unknown> {
-  const [accountState, symbolEntry] = await Promise.all([
-    fetchAccountStateForAddress(signer.address, market),
-    fetchSymbolEntry(params.symbol, market),
-  ]);
-
-  const symbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
-  if (symbolID == null) {
-    throw new Error(`placeOrderWithSigner: symbolID not found for symbol "${params.symbol}"`);
-  }
-
-  const { pricePrecision, tickSize, quantityPrecision, stepSize } = extractPrecision(symbolEntry);
-  const timeInForce = params.timeInForce ?? (params.type === 2 ? 3 : 1);
-
-  const rawQty = parseFloat(params.quantity);
-  const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
-  const price = params.price !== undefined
-    ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
-    : undefined;
-
-  if (market === 'spot') {
-    const orderItem: Record<string, unknown> = {
-      symbolID,
-      clOrdID: generateClOrdID(),
-      side: params.side,
-      type: params.type,
-      timeInForce,
-    };
-    if (price !== undefined) orderItem.price = price;
-    orderItem.quantity = quantity;
-
-    const payload = {
-      accountID: accountState.accountID,
-      orders: [orderItem],
-    };
-
-    const data = await withRetry(() => signedPost('/trade/orders/batch', payload as Record<string, unknown>, market, signer));
-    const result = data as Record<string, unknown> | unknown[];
-    const firstResult = Array.isArray(result) ? result[0] : result;
-    return firstResult ?? data;
-  } else {
-    // Perps
-    const order: Record<string, unknown> = {
-      clOrdID: generateClOrdID(),
-      modifier: 1,
-      side: params.side,
-      type: params.type,
-      timeInForce,
-    };
-    if (price !== undefined) order.price = price;
-    order.quantity = quantity;
-    order.reduceOnly = false;
-    order.positionSide = 1;
-
-    const payload = {
-      accountID: accountState.accountID,
-      symbolID,
-      orders: [order],
-    };
-
-    const data = await withRetry(() => signedPost('/trade/orders', payload as Record<string, unknown>, market, signer));
-    const result = data as Record<string, unknown>;
-    const firstOrder = Array.isArray(result) ? result[0] : (Array.isArray(result?.orders) ? (result.orders as unknown[])[0] : result);
-    return firstOrder ?? data;
-  }
-}
 
 /**
  * Build a cancel item for a given orderId, used by batch cancel.
@@ -1105,36 +939,25 @@ function buildCancelItem(orderId: string, symbolID: number | string | null, incl
 }
 
 /**
- * Batch cancel open orders for a specific account.
- * Cancels orders by their IDs. Works for both primary and Account B.
+ * Batch cancel open orders for the current account.
+ * Cancels orders by their IDs.
  */
 export async function batchCancelOrders(
   orderIds: string[],
   symbol: string,
   market: 'spot' | 'perps',
-  signer?: SignerOverride,
 ): Promise<unknown> {
   if (orderIds.length === 0) return {};
 
   if (market === 'perps') {
     const [accountState, symbolID] = await Promise.all([
-      signer
-        ? fetchAccountStateForAddress(signer.address, 'perps')
-        : fetchPerpsAccountState(),
+      fetchPerpsAccountState(),
       fetchPerpsSymbolID(symbol),
     ]);
     if (symbolID == null) throw new Error(`batchCancelOrders: symbolID not found for "${symbol}"`);
 
     const cancels = orderIds.map((orderId) => buildCancelItem(orderId, symbolID));
-
-    const payload = {
-      accountID: accountState.accountID,
-      cancels,
-    };
-
-    if (signer) {
-      return await withRetry(() => signedDelete('/trade/orders', payload as Record<string, unknown>, 'perps', signer));
-    }
+    const payload = { accountID: accountState.accountID, cancels };
     const res = await withRetry(() => perpsClient.delete('/trade/orders', { data: payload }));
     const data = res?.data ?? res ?? {};
     assertNoBodyError(data);
@@ -1142,114 +965,16 @@ export async function batchCancelOrders(
   } else {
     // Spot
     const [accountState, symbolID] = await Promise.all([
-      signer
-        ? fetchAccountStateForAddress(signer.address, 'spot')
-        : fetchSpotAccountState(),
+      fetchSpotAccountState(),
       fetchSpotSymbolID(symbol),
     ]);
     if (symbolID == null) throw new Error(`batchCancelOrders: symbolID not found for "${symbol}"`);
 
     const cancels = orderIds.map((orderId) => buildCancelItem(orderId, symbolID, true));
-
-    const payload = {
-      accountID: accountState.accountID,
-      cancels,
-    };
-
-    if (signer) {
-      return await withRetry(() => signedDelete('/trade/orders/batch', payload as Record<string, unknown>, 'spot', signer));
-    }
+    const payload = { accountID: accountState.accountID, cancels };
     const res = await withRetry(() => spotClient.delete('/trade/orders/batch', { data: payload }));
     const data = res?.data ?? res ?? {};
     assertNoBodyError(data);
     return data;
   }
-}
-
-/**
- * Fetch order fill status for a specific address (used for Account B fill verification).
- */
-export async function fetchOrderStatusForAddress(
-  orderId: string,
-  symbol: string,
-  market: 'spot' | 'perps',
-  address: string,
-): Promise<OrderStatusResult | null> {
-  if (!address) return null;
-  const client = getClient(market);
-  const sym = normalizeSymbol(symbol, market);
-  const numericOrderId = parseOrderIdNumeric(orderId);
-  try {
-    const res = await client.get(`/accounts/${address}/trades`, {
-      params: {
-        symbol: sym,
-        ...(orderId && !isNaN(numericOrderId) ? { orderID: numericOrderId } : {}),
-        limit: 50,
-      },
-    });
-    const trades = res?.data ?? res ?? [];
-    if (!Array.isArray(trades)) return null;
-
-    const matchingTrades = trades.filter((t: Record<string, unknown>) => {
-      const tradeOrderId = t.orderID ?? t.orderId ?? t.order_id;
-      if (tradeOrderId == null) return false;
-      const tradeIdStr = String(tradeOrderId);
-      return tradeIdStr === orderId || (!isNaN(numericOrderId) && Number(tradeOrderId) === numericOrderId);
-    });
-
-    if (matchingTrades.length === 0) {
-      return { orderId, status: 'EXPIRED', filledQty: 0, avgFillPrice: 0, filledValue: 0, totalFee: 0 };
-    }
-
-    let totalQty = 0;
-    let totalValue = 0;
-    let totalFee = 0;
-    for (const t of matchingTrades) {
-      const qty = parseFloat(t.quantity ?? '0') || 0;
-      const price = parseFloat(t.price ?? '0') || 0;
-      const fee = parseFloat(t.fee ?? t.commission ?? '0') || 0;
-      totalQty += qty;
-      totalValue += qty * price;
-      totalFee += fee;
-    }
-    const avgFillPrice = totalQty > 0 ? totalValue / totalQty : 0;
-
-    return {
-      orderId,
-      status: 'FILLED',
-      filledQty: totalQty,
-      avgFillPrice,
-      filledValue: totalValue,
-      totalFee,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Update perps leverage for a specific account (Account B support).
- */
-export async function updatePerpsLeverageForAddress(
-  symbol: string,
-  leverage: number,
-  marginMode: 1 | 2,
-  signer: SignerOverride,
-): Promise<void> {
-  const [accountState, symbolID] = await Promise.all([
-    fetchAccountStateForAddress(signer.address, 'perps'),
-    fetchPerpsSymbolID(symbol),
-  ]);
-  if (symbolID == null) {
-    throw new Error(`updatePerpsLeverageForAddress: symbolID not found for "${symbol}"`);
-  }
-
-  const payload = {
-    accountID: accountState.accountID,
-    symbolID,
-    leverage,
-    marginMode,
-  };
-
-  await withRetry(() => signedPost('/trade/leverage', payload as Record<string, unknown>, 'perps', signer));
 }

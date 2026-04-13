@@ -13,18 +13,11 @@ export interface VolumeBotLog {
 
 interface VolumeBotState {
   symbol: string;
-  minAmount: string;
-  maxAmount: string;
-  intervalSec: string;
   maxVolumeTarget: string;
-  spreadTolerance: string;
   isSpot: boolean;
   leverage: string;
   budget: string;
   maxSpend: string;
-  mode: 'dual_account' | 'single_account';
-  tickOffset: string;
-  fillWaitMs: string;
   status: 'STOPPED' | 'RUNNING' | 'ERROR';
   totalVolume: number;
   tradesCount: number;
@@ -62,18 +55,11 @@ interface BotStoreState {
 export const useBotStore = create<BotStoreState>((set) => ({
   volumeBot: {
     symbol: 'BTC_USDC',
-    minAmount: '0.001',
-    maxAmount: '0.01',
-    intervalSec: '10',
     maxVolumeTarget: '10000',
-    spreadTolerance: '50', // %50
     isSpot: true,
     leverage: '1',
     budget: '0',
     maxSpend: '0',
-    mode: 'single_account',
-    tickOffset: '1',
-    fillWaitMs: '30000',
     status: 'STOPPED',
     totalVolume: 0,
     tradesCount: 0,
@@ -87,7 +73,7 @@ export const useBotStore = create<BotStoreState>((set) => ({
       })),
     addLog: (log) =>
       set((state) => {
-        const newLogs = [log, ...state.volumeBot.logs].slice(0, 20);
+        const newLogs = [log, ...state.volumeBot.logs].slice(0, 200);
         return { volumeBot: { ...state.volumeBot, logs: newLogs } };
       }),
     resetStats: () =>
