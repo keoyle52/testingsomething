@@ -1,5 +1,5 @@
 import React from 'react';
-import { cn } from './NumberDisplay';
+import { cn } from '../../lib/utils';
 
 type ButtonVariant = 'primary' | 'danger' | 'ghost' | 'outline';
 type ButtonSize = 'sm' | 'md' | 'lg';

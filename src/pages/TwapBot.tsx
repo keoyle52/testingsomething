@@ -10,6 +10,7 @@ import { Button } from '../components/common/Button';
 import { useSettingsStore } from '../store/settingsStore';
 import { placeOrder, fetchBookTickers, fetchFeeRate, normalizeSymbol } from '../api/services';
 import type { FeeRateInfo } from '../api/services';
+import { getErrorMessage } from '../lib/utils';
 
 interface TwapLog {
   time: string;
@@ -54,10 +55,10 @@ export const TwapBot: React.FC = () => {
       const tickers = await fetchBookTickers(market);
       const arr = Array.isArray(tickers) ? tickers : [];
       const normalizedSym = normalizeSymbol(symbol, market);
-      const ticker = arr.find((t: any) => t.symbol === normalizedSym);
+      const ticker = arr.find((t) => (t as Record<string, unknown>).symbol === normalizedSym) as Record<string, unknown> | undefined;
 
-      const bidPrice = parseFloat(ticker?.bidPrice ?? ticker?.bid ?? '0');
-      const askPrice = parseFloat(ticker?.askPrice ?? ticker?.ask ?? '0');
+      const bidPrice = parseFloat(String(ticker?.bidPrice ?? ticker?.bid ?? '0'));
+      const askPrice = parseFloat(String(ticker?.askPrice ?? ticker?.ask ?? '0'));
       const fillPrice = side === 'BUY' ? askPrice : bidPrice;
 
       if (fillPrice <= 0) {
@@ -88,8 +89,8 @@ export const TwapBot: React.FC = () => {
         price: fillPrice,
         message: `Slice ${currentSlice + 1}/${totalSlices} tamamlandi`,
       });
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Bilinmeyen hata';
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err);
       addLog({ time: new Date().toLocaleTimeString(), message: `HATA: ${msg}` });
       toast.error(`TWAP: ${msg}`);
     }

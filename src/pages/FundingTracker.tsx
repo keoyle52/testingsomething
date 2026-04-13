@@ -3,6 +3,7 @@ import toast from 'react-hot-toast';
 import { Clock, TrendingUp, TrendingDown } from 'lucide-react';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { useSettingsStore } from '../store/settingsStore';
+import { getErrorMessage } from '../lib/utils';
 import { fetchTickers, fetchPositions } from '../api/services';
 
 interface FundingRow {
@@ -73,14 +74,14 @@ export const FundingTracker: React.FC = () => {
       const tickers = Array.isArray(rawTickers) ? rawTickers : [];
 
       const mapped: FundingRow[] = tickers
-        .filter((t: any) => t.fundingRate !== undefined && t.fundingRate !== null)
-        .map((t: any) => {
-          const fundingRate = parseFloat(t.fundingRate ?? 0);
+        .filter((t: Record<string, unknown>) => t.fundingRate !== undefined && t.fundingRate !== null)
+        .map((t: Record<string, unknown>) => {
+          const fundingRate = parseFloat(String(t.fundingRate ?? 0));
           const apr = fundingRate * 3 * 365;
-          const openInterest = t.openInterest != null ? parseFloat(t.openInterest) : null;
-          const volume24h = parseFloat(t.quoteVolume ?? t.volume ?? 0);
+          const openInterest = t.openInterest != null ? parseFloat(String(t.openInterest)) : null;
+          const volume24h = parseFloat(String(t.quoteVolume ?? t.volume ?? 0));
           return {
-            symbol: t.symbol ?? '',
+            symbol: String(t.symbol ?? ''),
             fundingRate,
             apr,
             openInterest,
@@ -90,9 +91,8 @@ export const FundingTracker: React.FC = () => {
         .sort((a: FundingRow, b: FundingRow) => Math.abs(b.fundingRate) - Math.abs(a.fundingRate));
 
       setRows(mapped);
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Funding verileri yüklenemedi';
-      toast.error(msg);
+    } catch (err: unknown) {
+      toast.error(getErrorMessage(err, 'Funding verileri yüklenemedi'));
     } finally {
       setLoading(false);
     }
@@ -109,28 +109,28 @@ export const FundingTracker: React.FC = () => {
 
       const tickers = Array.isArray(rawTickers) ? rawTickers : [];
       const rateMap: Record<string, number> = {};
-      for (const t of tickers) {
+      for (const item of tickers) {
+        const t = item as Record<string, unknown>;
         if (t.fundingRate != null) {
-          rateMap[t.symbol] = parseFloat(t.fundingRate);
+          rateMap[String(t.symbol)] = parseFloat(String(t.fundingRate));
         }
       }
 
       const positions = Array.isArray(rawPositions) ? rawPositions : [];
-      const mapped: PersonalFundingRow[] = positions.map((pos: any) => {
-        const symbol = pos.symbol ?? '';
-        const size = Math.abs(parseFloat(pos.size ?? pos.quantity ?? 0));
+      const mapped: PersonalFundingRow[] = positions.map((pos: Record<string, unknown>) => {
+        const symbol = String(pos.symbol ?? '');
+        const size = Math.abs(parseFloat(String(pos.size ?? pos.quantity ?? 0)));
         const side = pos.side === 1 || pos.side === 'BUY' || pos.side === 'LONG' ? 'LONG' : 'SHORT';
         const fundingRate = rateMap[symbol] ?? 0;
         const direction = side === 'LONG' ? -1 : 1;
-        const markPrice = parseFloat(pos.markPrice ?? pos.entryPrice ?? 0);
+        const markPrice = parseFloat(String(pos.markPrice ?? pos.entryPrice ?? 0));
         const estimatedPayment = direction * size * markPrice * fundingRate;
         return { symbol, side, size, fundingRate, estimatedPayment };
       });
 
       setPersonalRows(mapped);
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Pozisyon verileri yüklenemedi';
-      toast.error(msg);
+    } catch (err: unknown) {
+      toast.error(getErrorMessage(err, 'Pozisyon verileri yüklenemedi'));
     } finally {
       setPersonalLoading(false);
     }

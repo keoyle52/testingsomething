@@ -41,12 +41,12 @@ export const Dashboard: React.FC = () => {
       const rawTickers = await fetchTickers('perps');
       const tickersArr = Array.isArray(rawTickers) ? rawTickers : [];
       const mapped: TickerRow[] = tickersArr
-        .filter((t: any) => t.symbol)
-        .map((t: any) => ({
-          symbol: t.symbol,
-          lastPrice: parseFloat(t.lastPrice ?? t.close ?? 0),
-          change24h: parseFloat(t.priceChangePercent ?? t.change ?? 0),
-          volume24h: parseFloat(t.quoteVolume ?? t.volume ?? 0),
+        .filter((t: Record<string, unknown>) => t.symbol)
+        .map((t: Record<string, unknown>) => ({
+          symbol: String(t.symbol),
+          lastPrice: parseFloat(String(t.lastPrice ?? t.close ?? 0)),
+          change24h: parseFloat(String(t.priceChangePercent ?? t.change ?? 0)),
+          volume24h: parseFloat(String(t.quoteVolume ?? t.volume ?? 0)),
         }))
         .sort((a: TickerRow, b: TickerRow) => b.volume24h - a.volume24h)
         .slice(0, 20);

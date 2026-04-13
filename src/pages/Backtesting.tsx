@@ -5,6 +5,7 @@ import { Card, StatCard } from '../components/common/Card';
 import { Input, Select } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { fetchKlines } from '../api/services';
+import { getErrorMessage } from '../lib/utils';
 import toast from 'react-hot-toast';
 
 interface BacktestResult {
@@ -92,11 +93,11 @@ export const Backtesting: React.FC = () => {
         return;
       }
 
-      const closes: number[] = klines.map((k: any) => parseFloat(k.close ?? k[4]));
-      const highs: number[] = klines.map((k: any) => parseFloat(k.high ?? k[2]));
-      const lows: number[] = klines.map((k: any) => parseFloat(k.low ?? k[3]));
-      const times: string[] = klines.map((k: any) => {
-        const t = k.time ?? k.openTime ?? k[0];
+      const closes: number[] = klines.map((k: Record<string, unknown>) => parseFloat(String(k.close ?? (k as unknown as unknown[])[4])));
+      const highs: number[] = klines.map((k: Record<string, unknown>) => parseFloat(String(k.high ?? (k as unknown as unknown[])[2])));
+      const lows: number[] = klines.map((k: Record<string, unknown>) => parseFloat(String(k.low ?? (k as unknown as unknown[])[3])));
+      const times: string[] = klines.map((k: Record<string, unknown>) => {
+        const t = k.time ?? k.openTime ?? (k as unknown as unknown[])[0];
         return typeof t === 'number' ? new Date(t).toLocaleString('tr-TR') : String(t);
       });
 
@@ -286,8 +287,8 @@ export const Backtesting: React.FC = () => {
       });
 
       toast.success(`Backtest tamamlandi: ${trades.length} islem`);
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Backtest hatasi';
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err, 'Backtest hatasi');
       toast.error(msg);
     } finally {
       setLoading(false);

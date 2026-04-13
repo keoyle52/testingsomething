@@ -8,7 +8,8 @@ import { StatCard } from '../components/common/Card';
 import { Input, Select } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { useSettingsStore } from '../store/settingsStore';
-import { placeOrder, fetchBookTickers } from '../api/services';
+import { placeOrder, fetchBookTickers, normalizeSymbol } from '../api/services';
+import { getErrorMessage } from '../lib/utils';
 
 interface DcaLog {
   time: string;
@@ -54,10 +55,11 @@ export const DcaBot: React.FC = () => {
     try {
       const tickers = await fetchBookTickers(market);
       const arr = Array.isArray(tickers) ? tickers : [];
-      const ticker = arr.find((t: any) => t.symbol === symbol);
+      const normalizedSym = normalizeSymbol(symbol, market);
+      const ticker = arr.find((t) => (t as Record<string, unknown>).symbol === normalizedSym) as Record<string, unknown> | undefined;
 
-      const bidPrice = parseFloat(ticker?.bidPrice ?? ticker?.bid ?? '0');
-      const askPrice = parseFloat(ticker?.askPrice ?? ticker?.ask ?? '0');
+      const bidPrice = parseFloat(String(ticker?.bidPrice ?? ticker?.bid ?? '0'));
+      const askPrice = parseFloat(String(ticker?.askPrice ?? ticker?.ask ?? '0'));
       const fillPrice = side === 'BUY' ? askPrice : bidPrice;
 
       if (fillPrice <= 0) {
@@ -97,8 +99,8 @@ export const DcaBot: React.FC = () => {
         price: fillPrice,
         message: `DCA emri tamamlandi`,
       });
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Bilinmeyen hata';
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err);
       addLog({ time: new Date().toLocaleTimeString(), message: `HATA: ${msg}` });
       toast.error(`DCA: ${msg}`);
     }

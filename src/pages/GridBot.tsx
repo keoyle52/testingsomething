@@ -10,6 +10,7 @@ import {
   fetchOpenOrders,
   normalizeSymbol,
 } from '../api/services';
+import { getErrorMessage } from '../lib/utils';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { StatusBadge } from '../components/common/StatusBadge';
 import { ConfirmModal } from '../components/common/ConfirmModal';
@@ -76,13 +77,14 @@ export const GridBot: React.FC = () => {
           market,
         );
 
-        const orderId: string | null = String(result?.orderID ?? result?.orderId ?? result?.id ?? '') || null;
+        const res = result as Record<string, unknown> | undefined;
+        const orderId: string | null = String(res?.orderID ?? res?.orderId ?? res?.id ?? '') || null;
         if (orderId) {
           addLog({ message: `${side} LIMIT @ ${price.toFixed(2)} placed (${orderId})`, side });
         }
         return orderId;
-      } catch (err: any) {
-        const msg = err?.response?.data?.message ?? err?.message ?? 'Unknown error';
+      } catch (err: unknown) {
+        const msg = getErrorMessage(err);
         addLog({ message: `ERROR placing ${side} @ ${price.toFixed(2)}: ${msg}` });
         toast.error(`Grid Bot: ${msg}`);
         return null;
@@ -99,18 +101,18 @@ export const GridBot: React.FC = () => {
       const tickers = await fetchBookTickers(market);
       const arr = Array.isArray(tickers) ? tickers : [];
       const normalizedSym = normalizeSymbol(s.symbol, market);
-      const ticker = arr.find((t: any) => t.symbol === normalizedSym);
+      const ticker = arr.find((t) => (t as Record<string, unknown>).symbol === normalizedSym) as Record<string, unknown> | undefined;
 
       if (!ticker) {
         addLog({ message: `No ticker data found for ${normalizedSym}` });
         return null;
       }
 
-      const bid = parseFloat(ticker.bidPrice ?? ticker.bid ?? '0');
-      const ask = parseFloat(ticker.askPrice ?? ticker.ask ?? '0');
+      const bid = parseFloat(String(ticker.bidPrice ?? ticker.bid ?? '0'));
+      const ask = parseFloat(String(ticker.askPrice ?? ticker.ask ?? '0'));
       return (bid + ask) / 2;
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Unknown error';
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err);
       addLog({ message: `ERROR fetching price: ${msg}` });
       toast.error(`Grid Bot: ${msg}`);
       return null;
@@ -126,7 +128,7 @@ export const GridBot: React.FC = () => {
       const openOrders = await fetchOpenOrders(market);
       const openOrderIds = new Set(
         (Array.isArray(openOrders) ? openOrders : []).map(
-          (o: any) => String(o.orderID ?? o.orderId ?? o.id ?? ''),
+          (o) => { const r = o as Record<string, unknown>; return String(r.orderID ?? r.orderId ?? r.id ?? ''); },
         ),
       );
 
@@ -186,8 +188,8 @@ export const GridBot: React.FC = () => {
 
       gridLevelsRef.current = [...levels];
       setGridLevels([...levels]);
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Unknown error';
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err);
       addLog({ message: `ERROR polling orders: ${msg}` });
     }
   }, [addLog, placeGridOrder]);
@@ -299,8 +301,8 @@ export const GridBot: React.FC = () => {
     try {
       await cancelAllOrders(s.symbol, market);
       addLog({ message: 'All orders cancelled successfully' });
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Unknown error';
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err);
       addLog({ message: `ERROR cancelling orders: ${msg}` });
       toast.error(`Grid Bot: ${msg}`);
     }
@@ -392,7 +394,7 @@ export const GridBot: React.FC = () => {
         <Select
           label="Yön (Mod)"
           value={state.mode}
-          onChange={(e) => state.setField('mode', e.target.value)}
+          onChange={(e) => state.setField('mode', e.target.value as 'NEUTRAL' | 'LONG' | 'SHORT')}
           disabled={isRunning}
           options={[
             { value: 'NEUTRAL', label: 'Neutral' },

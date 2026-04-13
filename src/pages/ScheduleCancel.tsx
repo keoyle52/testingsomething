@@ -53,11 +53,11 @@ export const ScheduleCancel: React.FC = () => {
     try {
       if (scope === 'all' || scope === 'perps') {
         const perpsResults = await cancelAllOrders(undefined, 'perps');
-        totalCancelled += Array.isArray(perpsResults) ? perpsResults.filter((r: any) => !r.error).length : 0;
+        totalCancelled += Array.isArray(perpsResults) ? perpsResults.filter((r) => !(r as Record<string, unknown>).error).length : 0;
       }
       if (scope === 'all' || scope === 'spot') {
         const spotResults = await cancelAllOrders(undefined, 'spot');
-        totalCancelled += Array.isArray(spotResults) ? spotResults.filter((r: any) => !r.error).length : 0;
+        totalCancelled += Array.isArray(spotResults) ? spotResults.filter((r) => !(r as Record<string, unknown>).error).length : 0;
       }
 
       const resultMsg = `${totalCancelled} emir iptal edildi`;
@@ -68,8 +68,8 @@ export const ScheduleCancel: React.FC = () => {
         result: resultMsg,
         status: 'success',
       });
-    } catch (err: any) {
-      const errMsg = err?.message || 'Bilinmeyen hata';
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : 'Bilinmeyen hata';
       toast.error(`❌ İptal başarısız: ${errMsg}`);
       addHistory({
         timestamp: new Date().toLocaleString('tr-TR'),

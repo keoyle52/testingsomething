@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { LayoutDashboard, Bot, Grid2X2, Clock, Repeat, Users, LineChart, Coins, TimerOff, Bell, FlaskConical, Settings, Zap } from 'lucide-react';
-import { cn } from './common/NumberDisplay';
+import { cn } from '../lib/utils';
 
 const NAV_ITEMS = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },

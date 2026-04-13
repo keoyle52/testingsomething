@@ -1,5 +1,16 @@
 import { create } from 'zustand';
 
+export interface VolumeBotLog {
+  time: string;
+  symbol?: string;
+  side?: string;
+  amount?: number;
+  price?: number;
+  fee?: number;
+  orderId?: string;
+  message?: string;
+}
+
 interface VolumeBotState {
   symbol: string;
   minAmount: string;
@@ -17,9 +28,9 @@ interface VolumeBotState {
   totalFee: number;
   totalSpent: number;
   avgSpread: number;
-  logs: any[];
-  setField: (field: keyof VolumeBotState, value: any) => void;
-  addLog: (log: any) => void;
+  logs: VolumeBotLog[];
+  setField: <K extends keyof VolumeBotState>(field: K, value: VolumeBotState[K]) => void;
+  addLog: (log: VolumeBotLog) => void;
   resetStats: () => void;
 }
 
@@ -36,7 +47,7 @@ interface GridBotState {
   totalInvestment: number;
   completedGrids: number;
   realizedPnl: number;
-  setField: (field: keyof GridBotState, value: any) => void;
+  setField: <K extends keyof GridBotState>(field: K, value: GridBotState[K]) => void;
   resetStats: () => void;
 }
 

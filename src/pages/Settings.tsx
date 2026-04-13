@@ -9,7 +9,7 @@ import { Card } from '../components/common/Card';
 import { Input } from '../components/common/Input';
 import { Toggle } from '../components/common/Input';
 import { Button } from '../components/common/Button';
-import { cn } from '../components/common/NumberDisplay';
+import { cn } from '../lib/utils';
 
 const TABS = [
   { id: 'api' as const, label: 'API Bağlantısı', icon: Key },
@@ -43,8 +43,9 @@ export const Settings: React.FC = () => {
     try {
       await spotClient.get(`/accounts/${evmAddress}/balances`);
       toast.success('Bağlantı başarılı!');
-    } catch (error: any) {
-      toast.error(error?.response?.data?.message || 'Bağlantı başarısız.');
+    } catch (error: unknown) {
+      const e = error as { response?: { data?: { message?: string } } };
+      toast.error(e?.response?.data?.message || 'Bağlantı başarısız.');
     }
   };
 

@@ -63,7 +63,7 @@ export function deriveActionType(method: string, url: string): string {
  */
 export async function signPayload(
   actionType: string,
-  payload: any,
+  payload: Record<string, unknown>,
   privateKey: string,
   type: DomainType,
   isTestnet: boolean

@@ -1,5 +1,5 @@
 import React from 'react';
-import { cn } from './NumberDisplay';
+import { cn } from '../../lib/utils';
 
 interface StatusBadgeProps {
   status: 'STOPPED' | 'RUNNING' | 'ERROR';

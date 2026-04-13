@@ -119,11 +119,14 @@ export const VolumeBot: React.FC = () => {
     const market = state.isSpot ? 'spot' : 'perps';
     fetchSymbols(market)
       .then((symbols) => {
-        const list: any[] = Array.isArray(symbols) ? symbols : (symbols?.symbols ?? symbols?.data ?? []);
+        const symbolsObj = symbols as Record<string, unknown> | unknown[];
+        const list: Record<string, unknown>[] = Array.isArray(symbolsObj)
+          ? symbolsObj as Record<string, unknown>[]
+          : ((symbolsObj as Record<string, unknown>)?.symbols ?? (symbolsObj as Record<string, unknown>)?.data ?? []) as Record<string, unknown>[];
         const opts = list
-          .filter((s: any) => s.symbol || s.name || s.ticker)
-          .map((s: any) => {
-            const sym = s.symbol ?? s.name ?? s.ticker;
+          .filter((s: Record<string, unknown>) => s.symbol || s.name || s.ticker)
+          .map((s: Record<string, unknown>) => {
+            const sym = String(s.symbol ?? s.name ?? s.ticker);
             return { value: sym, label: sym };
           });
         if (opts.length > 0) {
@@ -247,8 +250,11 @@ export const VolumeBot: React.FC = () => {
           market,
         );
 
-        const buyOrderId: string = String(buyResult?.orderID ?? buyResult?.orderId ?? buyResult?.id ?? '');
-        const sellOrderId: string = String(sellResult?.orderID ?? sellResult?.orderId ?? sellResult?.id ?? '');
+        const buyRes = buyResult as Record<string, unknown> | undefined;
+        const sellRes = sellResult as Record<string, unknown> | undefined;
+
+        const buyOrderId: string = String(buyRes?.orderID ?? buyRes?.orderId ?? buyRes?.id ?? '');
+        const sellOrderId: string = String(sellRes?.orderID ?? sellRes?.orderId ?? sellRes?.id ?? '');
 
         s.addLog({
           time: new Date().toLocaleTimeString(),
@@ -380,7 +386,8 @@ export const VolumeBot: React.FC = () => {
           market,
         );
 
-        const orderId: string = String(result?.orderID ?? result?.orderId ?? result?.id ?? '');
+        const res = result as Record<string, unknown> | undefined;
+        const orderId: string = String(res?.orderID ?? res?.orderId ?? res?.id ?? '');
 
         s.addLog({
           time: new Date().toLocaleTimeString(),

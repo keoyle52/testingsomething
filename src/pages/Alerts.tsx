@@ -5,7 +5,7 @@ import { fetchBookTickers } from '../api/services';
 import { Card } from '../components/common/Card';
 import { Input, Select } from '../components/common/Input';
 import { Button } from '../components/common/Button';
-import { cn } from '../components/common/NumberDisplay';
+import { cn } from '../lib/utils';
 
 interface PriceAlert {
   id: string;
@@ -93,11 +93,12 @@ export const Alerts: React.FC = () => {
         try {
           const tickers = await fetchBookTickers(market);
           const arr = Array.isArray(tickers) ? tickers : [];
-          for (const t of arr) {
-            const bid = parseFloat(t.bidPrice ?? t.bid ?? '0');
-            const ask = parseFloat(t.askPrice ?? t.ask ?? '0');
+          for (const item of arr) {
+            const t = item as Record<string, unknown>;
+            const bid = parseFloat(String(t.bidPrice ?? t.bid ?? '0'));
+            const ask = parseFloat(String(t.askPrice ?? t.ask ?? '0'));
             if (t.symbol) {
-              priceMap[`${t.symbol}_${market}`] = (bid + ask) / 2;
+              priceMap[`${String(t.symbol)}_${market}`] = (bid + ask) / 2;
             }
           }
         } catch {

@@ -1,4 +1,4 @@
-type MessageHandler = (data: any) => void;
+type MessageHandler = (data: unknown) => void;
 
 const WS_URL_MAINNET = 'wss://mainnet-gw.sodex.dev/ws';
 const WS_URL_TESTNET = 'wss://testnet-gw.sodex.dev/ws';

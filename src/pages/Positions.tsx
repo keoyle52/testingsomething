@@ -13,6 +13,7 @@ import {
   placeOrder,
   cancelAllOrders,
 } from '../api/services';
+import { getErrorMessage } from '../lib/utils';
 
 interface PositionRow {
   symbol: string;
@@ -61,15 +62,15 @@ export const Positions: React.FC = () => {
       setMarginBalance(totalBalance);
 
       const positionsArr = Array.isArray(rawPositions) ? rawPositions : [];
-      const mapped: PositionRow[] = positionsArr.map((pos: any) => {
-        const rawSize = parseFloat(pos.size ?? pos.quantity ?? 0);
+      const mapped: PositionRow[] = positionsArr.map((pos: Record<string, unknown>) => {
+        const rawSize = parseFloat(String(pos.size ?? pos.quantity ?? 0));
         const size = Math.abs(rawSize);
-        const entryPrice = parseFloat(pos.avgEntryPrice ?? pos.entryPrice ?? pos.avgPrice ?? 0);
-        const symbol = pos.symbol ?? '';
-        const markPrice = priceMap[symbol] ?? parseFloat(pos.markPrice ?? 0);
-        const liquidationPrice = parseFloat(pos.liquidationPrice ?? pos.liqPrice ?? 0);
-        const margin = parseFloat(pos.initialMargin ?? pos.margin ?? 0);
-        const leverage = parseFloat(pos.leverage ?? 0);
+        const entryPrice = parseFloat(String(pos.avgEntryPrice ?? pos.entryPrice ?? pos.avgPrice ?? 0));
+        const symbol = String(pos.symbol ?? '');
+        const markPrice = priceMap[symbol] ?? parseFloat(String(pos.markPrice ?? 0));
+        const liquidationPrice = parseFloat(String(pos.liquidationPrice ?? pos.liqPrice ?? 0));
+        const margin = parseFloat(String(pos.initialMargin ?? pos.margin ?? 0));
+        const leverage = parseFloat(String(pos.leverage ?? 0));
 
         // SoDEX: position side is always BOTH. Positive size = LONG, negative = SHORT.
         const side = (pos.side === 'LONG' || (pos.side !== 'SHORT' && rawSize >= 0))
@@ -84,9 +85,8 @@ export const Positions: React.FC = () => {
       });
 
       setPositions(mapped);
-    } catch (err: any) {
-      const msg = err?.response?.data?.message ?? err?.message ?? 'Pozisyonlar yüklenemedi';
-      toast.error(msg);
+    } catch (err: unknown) {
+      toast.error(getErrorMessage(err, 'Pozisyonlar yüklenemedi'));
     } finally {
       setLoading(false);
     }
@@ -114,8 +114,8 @@ export const Positions: React.FC = () => {
       );
       toast.success(`${pos.symbol} pozisyonu kapatıldı`);
       loadData();
-    } catch (err: any) {
-      toast.error(err?.response?.data?.message ?? err?.message ?? 'Pozisyon kapatılamadı');
+    } catch (err: unknown) {
+      toast.error(getErrorMessage(err, 'Pozisyon kapatılamadı'));
     }
   }, [loadData]);
 
