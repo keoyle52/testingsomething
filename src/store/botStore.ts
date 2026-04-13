@@ -1,35 +1,5 @@
 import { create } from 'zustand';
 
-export interface VolumeBotLog {
-  time: string;
-  symbol?: string;
-  side?: string;
-  amount?: number;
-  price?: number;
-  fee?: number;
-  orderId?: string;
-  message?: string;
-}
-
-interface VolumeBotState {
-  symbol: string;
-  maxVolumeTarget: string;
-  isSpot: boolean;
-  leverage: string;
-  budget: string;
-  maxSpend: string;
-  status: 'STOPPED' | 'RUNNING' | 'ERROR';
-  totalVolume: number;
-  tradesCount: number;
-  totalFee: number;
-  totalSpent: number;
-  avgSpread: number;
-  logs: VolumeBotLog[];
-  setField: <K extends keyof VolumeBotState>(field: K, value: VolumeBotState[K]) => void;
-  addLog: (log: VolumeBotLog) => void;
-  resetStats: () => void;
-}
-
 interface GridBotState {
   symbol: string;
   lowerPrice: string;
@@ -48,48 +18,10 @@ interface GridBotState {
 }
 
 interface BotStoreState {
-  volumeBot: VolumeBotState;
   gridBot: GridBotState;
 }
 
 export const useBotStore = create<BotStoreState>((set) => ({
-  volumeBot: {
-    symbol: 'BTC_USDC',
-    maxVolumeTarget: '10000',
-    isSpot: true,
-    leverage: '1',
-    budget: '0',
-    maxSpend: '0',
-    status: 'STOPPED',
-    totalVolume: 0,
-    tradesCount: 0,
-    totalFee: 0,
-    totalSpent: 0,
-    avgSpread: 0,
-    logs: [],
-    setField: (field, value) =>
-      set((state) => ({
-        volumeBot: { ...state.volumeBot, [field]: value },
-      })),
-    addLog: (log) =>
-      set((state) => {
-        const newLogs = [log, ...state.volumeBot.logs].slice(0, 200);
-        return { volumeBot: { ...state.volumeBot, logs: newLogs } };
-      }),
-    resetStats: () =>
-      set((state) => ({
-        volumeBot: {
-          ...state.volumeBot,
-          totalVolume: 0,
-          tradesCount: 0,
-          totalFee: 0,
-          totalSpent: 0,
-          avgSpread: 0,
-          logs: [],
-          status: 'STOPPED'
-        },
-      })),
-  },
   gridBot: {
     symbol: 'BTC_USDC',
     lowerPrice: '60000',

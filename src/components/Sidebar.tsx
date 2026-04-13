@@ -1,11 +1,10 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Bot, Grid2X2, Clock, Repeat, Users, LineChart, Coins, TimerOff, Bell, FlaskConical, Settings, Zap } from 'lucide-react';
+import { LayoutDashboard, Grid2X2, Clock, Repeat, Users, LineChart, Coins, TimerOff, Bell, FlaskConical, Settings, Zap } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 const NAV_ITEMS = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/volume-bot', icon: Bot, label: 'Volume Bot' },
   { to: '/grid-bot', icon: Grid2X2, label: 'Grid Bot' },
   { to: '/twap-bot', icon: Clock, label: 'TWAP Bot' },
   { to: '/dca-bot', icon: Repeat, label: 'DCA Bot' },

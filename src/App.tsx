@@ -5,7 +5,6 @@ import { Sidebar } from './components/Sidebar';
 import { Topbar } from './components/Topbar';
 
 import { Dashboard } from './pages/Dashboard';
-import { VolumeBot } from './pages/VolumeBot';
 import { GridBot } from './pages/GridBot';
 import { TwapBot } from './pages/TwapBot';
 import { DcaBot } from './pages/DcaBot';
@@ -26,7 +25,6 @@ function App() {
         <main className="flex-1 overflow-x-hidden overflow-y-auto bg-background">
           <Routes>
             <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/volume-bot" element={<VolumeBot />} />
             <Route path="/grid-bot" element={<GridBot />} />
             <Route path="/twap-bot" element={<TwapBot />} />
             <Route path="/dca-bot" element={<DcaBot />} />
