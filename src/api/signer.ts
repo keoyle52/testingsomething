@@ -79,6 +79,8 @@ export async function signPayload(
   apiKey?: string,
 ): Promise<{ signature: string; nonce: string }> {
   const wallet = new ethers.Wallet(privateKey);
+  // Use apiKey for per-key nonce isolation; fall back to wallet address
+  // so each signing identity gets its own monotonic nonce counter.
   const nonce = getMonotonicNonce(apiKey ?? wallet.address);
 
   // Wrap in the {type, params} envelope required by Sodex before hashing.

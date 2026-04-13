@@ -48,6 +48,10 @@ const RATE_LIMIT_PENALTY_SEC = 2;
 const REBATE_THRESHOLD_SHARE = 0.005; // 0.5%
 /** Rough estimate of 14-day platform total volume used when no target is set. */
 const ESTIMATED_PLATFORM_VOLUME = 1_000_000;
+/** Default tick offset for maker ping-pong strategy (how many ticks inside the spread). */
+const DEFAULT_TICK_OFFSET = 1;
+/** Default fill wait time in ms for maker ping-pong strategy. */
+const DEFAULT_FILL_WAIT_MS = 30000;
 
 function symbolFromBase(base: string, market: 'spot' | 'perps'): string {
   return market === 'spot' ? `${base}_USDC` : `${base}-USD`;
@@ -430,8 +434,8 @@ export const VolumeBot: React.FC = () => {
         // Orders rest in the book as maker; other participants fill them.
         // No STP risk since BUY and SELL prices don't cross each other.
         const tickSize = rules.tickSize > 0 ? rules.tickSize : 0.01;
-        const tickOffsetVal = Math.max(1, parseInt(s.tickOffset) || 1);
-        const fillWaitMs = Math.max(1000, parseInt(s.fillWaitMs) || 30000);
+        const tickOffsetVal = Math.max(1, parseInt(s.tickOffset) || DEFAULT_TICK_OFFSET);
+        const fillWaitMs = Math.max(1000, parseInt(s.fillWaitMs) || DEFAULT_FILL_WAIT_MS);
         const buyPrice = (bidPrice + tickSize * tickOffsetVal).toFixed(pricePrecision);
         const sellPrice = (askPrice - tickSize * tickOffsetVal).toFixed(pricePrecision);
 
