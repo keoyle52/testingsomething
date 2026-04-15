@@ -88,7 +88,7 @@ export const Backtesting: React.FC = () => {
       const klines = Array.isArray(rawKlines) ? rawKlines : [];
 
       if (klines.length < 30) {
-        toast.error('Yeterli veri yok. Daha fazla mum verisi deneyin.');
+        toast.error('Not enough data. Try more candles.');
         setLoading(false);
         return;
       }
@@ -102,7 +102,7 @@ export const Backtesting: React.FC = () => {
       const lows: number[] = klines.map((k: Record<string, unknown>) => klineVal(k, 'low', 3));
       const times: string[] = klines.map((k: Record<string, unknown>) => {
         const t = k.time ?? k.openTime ?? (Array.isArray(k) ? (k as unknown as unknown[])[0] : 0);
-        return typeof t === 'number' ? new Date(t).toLocaleString('tr-TR') : String(t);
+        return typeof t === 'number' ? new Date(t).toLocaleString() : String(t);
       });
 
       const trades: TradeEntry[] = [];
@@ -290,9 +290,9 @@ export const Backtesting: React.FC = () => {
         trades,
       });
 
-      toast.success(`Backtest tamamlandi: ${trades.length} islem`);
+      toast.success(`Backtest completed: ${trades.length} trade(s)`);
     } catch (err: unknown) {
-      const msg = getErrorMessage(err, 'Backtest hatasi');
+      const msg = getErrorMessage(err, 'Backtest error');
       toast.error(msg);
     } finally {
       setLoading(false);
@@ -315,7 +315,7 @@ export const Backtesting: React.FC = () => {
         <div>
           <h2 className="text-lg font-semibold">Backtesting</h2>
           <p className="text-[11px] text-text-muted">
-            Gecmis veriler uzerinde strateji test edin
+            Test strategies on historical data
           </p>
         </div>
       </div>
@@ -324,13 +324,13 @@ export const Backtesting: React.FC = () => {
       <Card className="shrink-0">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
           <Input
-            label="Sembol"
+            label="Symbol"
             type="text"
             value={symbol}
             onChange={(e) => setSymbol(e.target.value)}
           />
           <Select
-            label="Strateji"
+            label="Strategy"
             value={strategy}
             onChange={(e) => setStrategy(e.target.value as StrategyType)}
             options={[
@@ -340,19 +340,19 @@ export const Backtesting: React.FC = () => {
             ]}
           />
           <Select
-            label="Zaman Dilimi"
+            label="Timeframe"
             value={timeframe}
             onChange={(e) => setTimeframe(e.target.value)}
             options={[
-              { value: '5m', label: '5 Dakika' },
-              { value: '15m', label: '15 Dakika' },
-              { value: '1h', label: '1 Saat' },
-              { value: '4h', label: '4 Saat' },
-              { value: '1d', label: '1 Gun' },
+              { value: '5m', label: '5 Min' },
+              { value: '15m', label: '15 Min' },
+              { value: '1h', label: '1 Hour' },
+              { value: '4h', label: '4 Hours' },
+              { value: '1d', label: '1 Day' },
             ]}
           />
           <Input
-            label="Mum Sayisi"
+            label="Candle Count"
             type="number"
             value={candles}
             onChange={(e) => setCandles(e.target.value)}
@@ -380,7 +380,7 @@ export const Backtesting: React.FC = () => {
               onClick={runBacktest}
               loading={loading}
             >
-              Backtest Calistir
+              Run Backtest
             </Button>
           </div>
         </div>
@@ -391,18 +391,18 @@ export const Backtesting: React.FC = () => {
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 shrink-0">
             <StatCard
-              label="Toplam Islem"
+              label="Total Trades"
               value={<NumberDisplay value={result.totalTrades} decimals={0} />}
               icon={<BarChart3 size={16} />}
             />
             <StatCard
-              label="Kazanma Orani"
+              label="Win Rate"
               value={<NumberDisplay value={result.winRate} suffix="%" trend={result.winRate >= 50 ? 'up' : 'down'} />}
               icon={<Activity size={16} />}
               trend={result.winRate >= 50 ? 'up' : 'down'}
             />
             <StatCard
-              label="Toplam PnL"
+              label="Total PnL"
               value={
                 <NumberDisplay
                   value={Math.abs(result.totalPnl)}
@@ -422,15 +422,15 @@ export const Backtesting: React.FC = () => {
 
           <div className="grid grid-cols-3 gap-4 shrink-0">
             <div className="stat-card text-center">
-              <div className="text-[10px] text-text-muted uppercase mb-1">Kazanan</div>
+              <div className="text-[10px] text-text-muted uppercase mb-1">Winners</div>
               <div className="text-lg font-semibold text-success">{result.winTrades}</div>
             </div>
             <div className="stat-card text-center">
-              <div className="text-[10px] text-text-muted uppercase mb-1">Kaybeden</div>
+              <div className="text-[10px] text-text-muted uppercase mb-1">Losers</div>
               <div className="text-lg font-semibold text-danger">{result.lossTrades}</div>
             </div>
             <div className="stat-card text-center">
-              <div className="text-[10px] text-text-muted uppercase mb-1">Sharpe Orani</div>
+              <div className="text-[10px] text-text-muted uppercase mb-1">Sharpe Ratio</div>
               <div className="text-lg font-semibold">{result.sharpeRatio.toFixed(2)}</div>
             </div>
           </div>
@@ -439,19 +439,19 @@ export const Backtesting: React.FC = () => {
           <div className="flex-1 min-h-0 glass-card flex flex-col overflow-hidden p-0">
             <div className="px-5 py-3 border-b border-border flex items-center justify-between">
               <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
-                Islem Gecmisi
+                Trade History
               </span>
-              <span className="badge badge-primary">{result.trades.length} islem</span>
+              <span className="badge badge-primary">{result.trades.length} trade(s)</span>
             </div>
             <div className="overflow-auto flex-1">
               <table className="data-table text-sm text-left whitespace-nowrap">
                 <thead className="text-[11px] text-text-muted uppercase tracking-wider border-b border-border">
                   <tr>
-                    <th className="px-5 py-3 font-medium">Giris</th>
-                    <th className="px-5 py-3 font-medium">Cikis</th>
-                    <th className="px-5 py-3 font-medium">Yon</th>
-                    <th className="px-5 py-3 font-medium text-right">Giris Fiyati</th>
-                    <th className="px-5 py-3 font-medium text-right">Cikis Fiyati</th>
+                    <th className="px-5 py-3 font-medium">Entry</th>
+                    <th className="px-5 py-3 font-medium">Exit</th>
+                    <th className="px-5 py-3 font-medium">Side</th>
+                    <th className="px-5 py-3 font-medium text-right">Entry Price</th>
+                    <th className="px-5 py-3 font-medium text-right">Exit Price</th>
                     <th className="px-5 py-3 font-medium text-right">PnL</th>
                   </tr>
                 </thead>
@@ -495,8 +495,8 @@ export const Backtesting: React.FC = () => {
         <div className="flex-1 flex items-center justify-center text-text-muted">
           <div className="text-center">
             <FlaskConical size={48} className="mx-auto mb-4 opacity-20" />
-            <p className="text-sm">Strateji parametrelerini ayarlayin ve backtest calistirin.</p>
-            <p className="text-xs mt-1">Sonuclar burada gorunecektir.</p>
+            <p className="text-sm">Set strategy parameters and run a backtest.</p>
+            <p className="text-xs mt-1">Results will appear here.</p>
           </div>
         </div>
       )}

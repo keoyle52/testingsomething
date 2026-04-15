@@ -1,20 +1,27 @@
+import { Suspense, lazy } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 
 import { Sidebar } from './components/Sidebar';
 import { Topbar } from './components/Topbar';
 
-import { Dashboard } from './pages/Dashboard';
-import { GridBot } from './pages/GridBot';
-import { TwapBot } from './pages/TwapBot';
-import { DcaBot } from './pages/DcaBot';
-import { CopyTrader } from './pages/CopyTrader';
-import { Positions } from './pages/Positions';
-import { FundingTracker } from './pages/FundingTracker';
-import { ScheduleCancel } from './pages/ScheduleCancel';
-import { Alerts } from './pages/Alerts';
-import { Backtesting } from './pages/Backtesting';
-import { Settings } from './pages/Settings';
+const Dashboard    = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
+const GridBot      = lazy(() => import('./pages/GridBot').then(m => ({ default: m.GridBot })));
+const TwapBot      = lazy(() => import('./pages/TwapBot').then(m => ({ default: m.TwapBot })));
+const DcaBot       = lazy(() => import('./pages/DcaBot').then(m => ({ default: m.DcaBot })));
+const CopyTrader   = lazy(() => import('./pages/CopyTrader').then(m => ({ default: m.CopyTrader })));
+const Positions    = lazy(() => import('./pages/Positions').then(m => ({ default: m.Positions })));
+const FundingTracker = lazy(() => import('./pages/FundingTracker').then(m => ({ default: m.FundingTracker })));
+const ScheduleCancel = lazy(() => import('./pages/ScheduleCancel').then(m => ({ default: m.ScheduleCancel })));
+const Alerts       = lazy(() => import('./pages/Alerts').then(m => ({ default: m.Alerts })));
+const Backtesting  = lazy(() => import('./pages/Backtesting').then(m => ({ default: m.Backtesting })));
+const Settings     = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })));
+
+const PageLoader = () => (
+  <div className="flex-1 flex items-center justify-center">
+    <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+  </div>
+);
 
 function App() {
   return (
@@ -23,20 +30,22 @@ function App() {
       <div className="flex-1 flex flex-col overflow-hidden">
         <Topbar />
         <main className="flex-1 overflow-x-hidden overflow-y-auto bg-background">
-          <Routes>
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/grid-bot" element={<GridBot />} />
-            <Route path="/twap-bot" element={<TwapBot />} />
-            <Route path="/dca-bot" element={<DcaBot />} />
-            <Route path="/copy-trader" element={<CopyTrader />} />
-            <Route path="/positions" element={<Positions />} />
-            <Route path="/funding" element={<FundingTracker />} />
-            <Route path="/schedule-cancel" element={<ScheduleCancel />} />
-            <Route path="/alerts" element={<Alerts />} />
-            <Route path="/backtesting" element={<Backtesting />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
-          </Routes>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              <Route path="/dashboard"       element={<Dashboard />} />
+              <Route path="/grid-bot"        element={<GridBot />} />
+              <Route path="/twap-bot"        element={<TwapBot />} />
+              <Route path="/dca-bot"         element={<DcaBot />} />
+              <Route path="/copy-trader"     element={<CopyTrader />} />
+              <Route path="/positions"       element={<Positions />} />
+              <Route path="/funding"         element={<FundingTracker />} />
+              <Route path="/schedule-cancel" element={<ScheduleCancel />} />
+              <Route path="/alerts"          element={<Alerts />} />
+              <Route path="/backtesting"     element={<Backtesting />} />
+              <Route path="/settings"        element={<Settings />} />
+              <Route path="*"               element={<Navigate to="/dashboard" replace />} />
+            </Routes>
+          </Suspense>
         </main>
       </div>
 

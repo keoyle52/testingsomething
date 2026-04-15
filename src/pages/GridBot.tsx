@@ -9,7 +9,6 @@ import {
   fetchBookTickers,
   fetchOpenOrders,
   normalizeSymbol,
-  fetchSymbolTradingRules,
 } from '../api/services';
 import { getErrorMessage } from '../lib/utils';
 import { NumberDisplay } from '../components/common/NumberDisplay';
@@ -66,27 +65,18 @@ export const GridBot: React.FC = () => {
       const market: 'spot' | 'perps' = s.isSpot ? 'spot' : 'perps';
 
       try {
-        // Fetch symbol trading rules (cached in services.ts — no extra API cost)
-        const rules = await fetchSymbolTradingRules(s.symbol, market);
-
-        // Round quantity to stepSize
         const rawQty = parseFloat(s.amountPerGrid);
-        if (isNaN(rawQty) || rawQty <= 0) throw new Error('Geçersiz miktar');
-        const steppedQty = Math.floor(rawQty / rules.stepSize) * rules.stepSize;
-        const quantityStr = steppedQty.toFixed(rules.quantityPrecision);
+        if (isNaN(rawQty) || rawQty <= 0) throw new Error('Invalid quantity — check Amount/Grid');
 
-        // Round price to tickSize
-        const tickedPrice = Math.floor(price / rules.tickSize) * rules.tickSize;
-        const priceStr = tickedPrice.toFixed(rules.pricePrecision);
-
+        // placeOrder handles all rounding internally via roundToTick
         const result = await placeOrder(
           {
             symbol: s.symbol,
             side: side === 'BUY' ? 1 : 2,
-            type: 1,
-            quantity: quantityStr,
-            price: priceStr,
-            timeInForce: 1,
+            type: 1,          // LIMIT
+            quantity: String(rawQty),
+            price: String(price),
+            timeInForce: 1,   // GTC
           },
           market,
         );
@@ -94,7 +84,7 @@ export const GridBot: React.FC = () => {
         const res = result as Record<string, unknown> | undefined;
         const orderId: string | null = String(res?.orderID ?? res?.orderId ?? res?.id ?? '') || null;
         if (orderId) {
-          addLog({ message: `${side} LIMIT @ ${priceStr} placed (${orderId})`, side });
+          addLog({ message: `${side} LIMIT @ ${price.toFixed(2)} placed (${orderId})`, side });
         }
         return orderId;
       } catch (err: unknown) {
@@ -350,8 +340,8 @@ export const GridBot: React.FC = () => {
     <div className="flex h-[calc(100vh-52px)]">
       <ConfirmModal
         isOpen={showConfirm}
-        title="Grid Bot'u Başlat"
-        message={`${state.symbol} için Grid Bot başlatılacak.\nPiyasa: ${state.isSpot ? 'Spot' : 'Perps'}\nAralık: ${state.lowerPrice} – ${state.upperPrice}\nGrid Sayısı: ${state.gridCount}\nMiktar/Grid: ${state.amountPerGrid}\nMod: ${state.mode}`}
+        title="Start Grid Bot"
+        message={`Grid bot will start for ${state.symbol}.\nMarket: ${state.isSpot ? 'Spot' : 'Perps'}\nRange: ${state.lowerPrice} – ${state.upperPrice}\nGrids: ${state.gridCount}\nAmount/Grid: ${state.amountPerGrid}\nMode: ${state.mode}`}
         onConfirm={doStart}
         onCancel={() => setShowConfirm(false)}
       />
@@ -359,12 +349,12 @@ export const GridBot: React.FC = () => {
       {/* Settings Panel */}
       <div className="w-80 border-r border-border bg-surface/30 backdrop-blur-sm p-5 flex flex-col gap-5 overflow-y-auto">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-sm">Ayarlar</h2>
+          <h2 className="font-semibold text-sm">Settings</h2>
           <StatusBadge status={state.status} />
         </div>
 
         <Input
-          label="Sembol"
+          label="Symbol"
           type="text"
           value={state.symbol}
           onChange={(e) => state.setField('symbol', e.target.value)}
@@ -373,14 +363,14 @@ export const GridBot: React.FC = () => {
 
         <div className="grid grid-cols-2 gap-3">
           <Input
-            label="Alt Fiyat"
+            label="Lower Price"
             type="number"
             value={state.lowerPrice}
             onChange={(e) => state.setField('lowerPrice', e.target.value)}
             disabled={isRunning}
           />
           <Input
-            label="Üst Fiyat"
+            label="Upper Price"
             type="number"
             value={state.upperPrice}
             onChange={(e) => state.setField('upperPrice', e.target.value)}
@@ -390,14 +380,14 @@ export const GridBot: React.FC = () => {
 
         <div className="grid grid-cols-2 gap-3">
           <Input
-            label="Grid Sayısı"
+            label="Grid Count"
             type="number"
             value={state.gridCount}
             onChange={(e) => state.setField('gridCount', e.target.value)}
             disabled={isRunning}
           />
           <Input
-            label="Miktar/Grid"
+            label="Amount/Grid"
             type="number"
             value={state.amountPerGrid}
             onChange={(e) => state.setField('amountPerGrid', e.target.value)}
@@ -406,7 +396,7 @@ export const GridBot: React.FC = () => {
         </div>
 
         <Select
-          label="Yön (Mod)"
+          label="Direction (Mode)"
           value={state.mode}
           onChange={(e) => state.setField('mode', e.target.value as 'NEUTRAL' | 'LONG' | 'SHORT')}
           disabled={isRunning}
@@ -419,7 +409,7 @@ export const GridBot: React.FC = () => {
 
         {/* Market Toggle */}
         <div className="space-y-1.5">
-          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">Piyasa</label>
+          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">Market</label>
           <div className="flex gap-2">
             <button
               onClick={() => {
@@ -449,11 +439,11 @@ export const GridBot: React.FC = () => {
         <div className="mt-auto pt-4 border-t border-border">
           {!isRunning ? (
             <Button variant="primary" fullWidth size="lg" icon={<Play size={16} />} onClick={startBot}>
-              {"Bot'u Başlat"}
+              Start Bot
             </Button>
           ) : (
             <Button variant="danger" fullWidth size="lg" icon={<Square size={16} />} onClick={stopBot}>
-              Durdur
+              Stop
             </Button>
           )}
         </div>
@@ -463,22 +453,22 @@ export const GridBot: React.FC = () => {
       <div className="flex-1 p-6 flex flex-col gap-5 overflow-y-auto">
         <div className="grid grid-cols-4 gap-4">
           <StatCard
-            label="Aktif Emirler"
+            label="Active Orders"
             value={<NumberDisplay value={state.activeOrders} decimals={0} />}
             icon={<Layers size={16} />}
           />
           <StatCard
-            label="Kullanılan Bakiye"
+            label="Total Invested"
             value={<NumberDisplay value={state.totalInvestment} prefix="$" />}
             icon={<DollarSign size={16} />}
           />
           <StatCard
-            label="Tamamlanan Gridler"
+            label="Completed Grids"
             value={<NumberDisplay value={state.completedGrids} decimals={0} />}
             icon={<CheckCircle2 size={16} />}
           />
           <StatCard
-            label="Gerçekleşen PnL"
+            label="Realized PnL"
             value={<NumberDisplay value={state.realizedPnl} prefix="$" trend={state.realizedPnl >= 0 ? (state.realizedPnl > 0 ? 'up' : 'neutral') : 'down'} />}
             icon={<TrendingUp size={16} />}
             trend={state.realizedPnl >= 0 ? (state.realizedPnl > 0 ? 'up' : 'neutral') : 'down'}
@@ -488,10 +478,10 @@ export const GridBot: React.FC = () => {
         {/* Grid Levels */}
         <div className="glass-card flex flex-col overflow-hidden p-0" style={{ maxHeight: '260px' }}>
           <div className="px-5 py-3 border-b border-border flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Grid Seviyeleri</span>
+            <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Grid Levels</span>
             <span className="badge badge-primary">
               <Grid2X2 size={10} />
-              {gridLevels.filter((l) => l.status === 'ACTIVE').length} aktif
+              {gridLevels.filter((l) => l.status === 'ACTIVE').length} active
             </span>
           </div>
           <div className="flex-1 overflow-y-auto p-3">
@@ -537,7 +527,7 @@ export const GridBot: React.FC = () => {
               </div>
             ) : (
               <div className="text-center text-text-muted pt-6 text-sm">
-                Bot başlatıldığında grid seviyeleri burada görünecektir.
+                Grid levels will appear here once the bot starts.
               </div>
             )}
           </div>
@@ -546,8 +536,8 @@ export const GridBot: React.FC = () => {
         {/* Logs */}
         <div className="flex-1 glass-card flex flex-col overflow-hidden p-0">
           <div className="px-5 py-3 border-b border-border flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Log Kayıtları</span>
-            <span className="text-[10px] text-text-muted">{logs.length} kayıt</span>
+            <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Activity Log</span>
+            <span className="text-[10px] text-text-muted">{logs.length} entries</span>
           </div>
           <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-1">
             {logs.map((log, i) => (
@@ -561,7 +551,7 @@ export const GridBot: React.FC = () => {
             ))}
             {logs.length === 0 && (
               <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
-                Bot log kayıtları burada görünecektir.
+                Bot activity logs will appear here.
               </div>
             )}
           </div>

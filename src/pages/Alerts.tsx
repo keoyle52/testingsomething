@@ -53,7 +53,7 @@ export const Alerts: React.FC = () => {
   const addAlert = useCallback(() => {
     const price = parseFloat(newPrice);
     if (!newSymbol.trim() || isNaN(price) || price <= 0) {
-      toast.error('Gecerli bir sembol ve fiyat girin');
+      toast.error('Enter a valid symbol and price');
       return;
     }
 
@@ -64,12 +64,12 @@ export const Alerts: React.FC = () => {
       targetPrice: price,
       market: newMarket,
       triggered: false,
-      createdAt: new Date().toLocaleString('tr-TR'),
+      createdAt: new Date().toLocaleString(),
     };
 
     updateAlerts([alert, ...alerts]);
     setNewPrice('');
-    toast.success(`Alarm eklendi: ${alert.symbol} ${alert.condition === 'ABOVE' ? '>' : '<'} ${price}`);
+    toast.success(`Alert added: ${alert.symbol} ${alert.condition === 'ABOVE' ? '>' : '<'} ${price}`);
   }, [newSymbol, newCondition, newPrice, newMarket, alerts, updateAlerts]);
 
   const removeAlert = useCallback((id: string) => {
@@ -120,21 +120,21 @@ export const Alerts: React.FC = () => {
 
         if (shouldTrigger) {
           hasChanges = true;
-          const direction = alert.condition === 'ABOVE' ? 'yukari' : 'asagi';
+          const direction = alert.condition === 'ABOVE' ? 'above' : 'below';
           toast(
-            `${alert.symbol} ${direction} alarmi tetiklendi! Fiyat: ${price.toFixed(2)}`,
+            `${alert.symbol} ${direction} alert triggered! Price: ${price.toFixed(2)}`,
             { icon: '🔔', duration: 10_000 },
           );
 
           // Try browser notification
           if ('Notification' in window && Notification.permission === 'granted') {
             new Notification(`SoDEX Alert: ${alert.symbol}`, {
-              body: `Fiyat ${direction} ${alert.targetPrice} seviyesini gecti. Guncel: ${price.toFixed(2)}`,
+              body: `Price crossed ${direction} ${alert.targetPrice}. Current: ${price.toFixed(2)}`,
               icon: '/vite.svg',
             });
           }
 
-          return { ...alert, triggered: true, triggeredAt: new Date().toLocaleString('tr-TR') };
+          return { ...alert, triggered: true, triggeredAt: new Date().toLocaleString() };
         }
 
         return alert;
@@ -172,15 +172,15 @@ export const Alerts: React.FC = () => {
             <Bell size={20} className="text-primary" />
           </div>
           <div>
-            <h2 className="text-lg font-semibold">Fiyat Alarmlari</h2>
+            <h2 className="text-lg font-semibold">Price Alerts</h2>
             <p className="text-[11px] text-text-muted">
-              {activeCount} aktif, {triggeredCount} tetiklenmis
+              {activeCount} active, {triggeredCount} triggered
             </p>
           </div>
         </div>
         {triggeredCount > 0 && (
           <Button variant="ghost" size="sm" onClick={clearTriggered}>
-            Tetiklenenleri Temizle
+            Clear Triggered
           </Button>
         )}
       </div>
@@ -189,34 +189,34 @@ export const Alerts: React.FC = () => {
       <Card className="shrink-0">
         <div className="flex items-center gap-2 mb-4">
           <Plus size={16} className="text-primary" />
-          <h3 className="text-sm font-semibold">Yeni Alarm</h3>
+          <h3 className="text-sm font-semibold">New Alert</h3>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
           <Input
-            label="Sembol"
+            label="Symbol"
             type="text"
             value={newSymbol}
             onChange={(e) => setNewSymbol(e.target.value)}
-            placeholder="BTC-USDC"
+            placeholder="BTC-USD"
           />
           <Select
-            label="Kosul"
+            label="Condition"
             value={newCondition}
             onChange={(e) => setNewCondition(e.target.value as 'ABOVE' | 'BELOW')}
             options={[
-              { value: 'ABOVE', label: 'Yukari Gecerse (>)' },
-              { value: 'BELOW', label: 'Asagi Gecerse (<)' },
+              { value: 'ABOVE', label: 'Crosses Above (>)' },
+              { value: 'BELOW', label: 'Crosses Below (<)' },
             ]}
           />
           <Input
-            label="Hedef Fiyat"
+            label="Target Price"
             type="number"
             value={newPrice}
             onChange={(e) => setNewPrice(e.target.value)}
             placeholder="50000"
           />
           <Select
-            label="Piyasa"
+            label="Market"
             value={newMarket}
             onChange={(e) => setNewMarket(e.target.value as 'spot' | 'perps')}
             options={[
@@ -234,7 +234,7 @@ export const Alerts: React.FC = () => {
       <div className="flex-1 min-h-0 glass-card flex flex-col overflow-hidden p-0">
         <div className="px-5 py-3 border-b border-border flex items-center justify-between">
           <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
-            Tum Alarmlar
+            All Alerts
           </span>
           <span className="badge badge-primary">{alerts.length}</span>
         </div>
@@ -243,8 +243,8 @@ export const Alerts: React.FC = () => {
             <div className="flex-1 flex items-center justify-center text-text-muted text-sm py-16">
               <div className="text-center">
                 <Bell size={32} className="mx-auto mb-3 opacity-30" />
-                <p>Henuz alarm eklenmedi.</p>
-                <p className="text-xs mt-1">Yukardaki formu kullanarak fiyat alarmi ekleyin.</p>
+                <p>No alerts added yet.</p>
+                <p className="text-xs mt-1">Use the form above to add a price alert.</p>
               </div>
             </div>
           ) : (
@@ -278,14 +278,14 @@ export const Alerts: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <span className="font-medium text-sm">{alert.symbol}</span>
                       <span className={`badge ${alert.condition === 'ABOVE' ? 'badge-success' : 'badge-danger'}`}>
-                        {alert.condition === 'ABOVE' ? '> Yukari' : '< Asagi'}
+                        {alert.condition === 'ABOVE' ? '> Above' : '< Below'}
                       </span>
                       <span className="badge badge-neutral">{alert.market}</span>
                     </div>
                     <div className="text-xs text-text-muted mt-0.5">
                       {alert.triggered
-                        ? `Tetiklendi: ${alert.triggeredAt}`
-                        : `Olusturulma: ${alert.createdAt}`}
+                        ? `Triggered: ${alert.triggeredAt}`
+                        : `Created: ${alert.createdAt}`}
                     </div>
                   </div>
 
@@ -295,7 +295,7 @@ export const Alerts: React.FC = () => {
                       {alert.targetPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                     </div>
                     {alert.triggered && (
-                      <span className="badge badge-success text-[10px]">Tetiklendi</span>
+                      <span className="badge badge-success text-[10px]">Triggered</span>
                     )}
                   </div>
 
@@ -318,8 +318,8 @@ export const Alerts: React.FC = () => {
       <div className="shrink-0 flex items-start gap-2 p-3 bg-info/5 border border-info/20 rounded-lg">
         <AlertCircle size={14} className="text-info shrink-0 mt-0.5" />
         <p className="text-xs text-info leading-relaxed">
-          Alarmlar tarayiciniz acik oldugu surece calisir. Sayfa kapatildiginda fiyat izleme durur.
-          Bildirim izni vererek tarayici bildirimlerini aktif edebilirsiniz.
+          Alerts run as long as the browser tab is open. Closing the page stops price monitoring.
+          Grant notification permission to enable browser notifications.
         </p>
       </div>
     </div>

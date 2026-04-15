@@ -26,12 +26,12 @@ export const TwapBot: React.FC = () => {
   const runningRef = useRef(false);
   const feeRateRef = useRef<FeeRateInfo>({ makerFee: 0.00035, takerFee: 0.00065 });
 
-  const [symbol, setSymbol] = useState('BTC-USDC');
+  const [symbol, setSymbol] = useState('BTC-USD');
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
   const [totalAmount, setTotalAmount] = useState('1');
   const [slices, setSlices] = useState('10');
   const [intervalSec, setIntervalSec] = useState('60');
-  const [isSpot, setIsSpot] = useState(true);
+  const [isSpot, setIsSpot] = useState(false);
   const [status, setStatus] = useState<'STOPPED' | 'RUNNING' | 'ERROR'>('STOPPED');
   const [showConfirm, setShowConfirm] = useState(false);
 
@@ -62,7 +62,7 @@ export const TwapBot: React.FC = () => {
       const fillPrice = side === 'BUY' ? askPrice : bidPrice;
 
       if (fillPrice <= 0) {
-        addLog({ time: new Date().toLocaleTimeString(), message: `Fiyat verisi alinamadi. Slice atlanıyor.` });
+        addLog({ time: new Date().toLocaleTimeString(), message: `No price data available. Slice skipped.` });
         return;
       }
 
@@ -72,7 +72,7 @@ export const TwapBot: React.FC = () => {
       );
 
       const vol = sliceAmount * fillPrice;
-      const fee = vol * feeRateRef.current.takerFee; // Market order = taker fee from API
+      const fee = vol * feeRateRef.current.takerFee;
 
       setExecutedSlices((p) => p + 1);
       setExecutedVolume((p) => p + vol);
@@ -87,11 +87,11 @@ export const TwapBot: React.FC = () => {
         side,
         amount: sliceAmount,
         price: fillPrice,
-        message: `Slice ${currentSlice + 1}/${totalSlices} tamamlandi`,
+        message: `Slice ${currentSlice + 1}/${totalSlices} completed`,
       });
     } catch (err: unknown) {
       const msg = getErrorMessage(err);
-      addLog({ time: new Date().toLocaleTimeString(), message: `HATA: ${msg}` });
+      addLog({ time: new Date().toLocaleTimeString(), message: `ERROR: ${msg}` });
       toast.error(`TWAP: ${msg}`);
     }
   }, [symbol, side, isSpot, addLog]);
@@ -104,7 +104,7 @@ export const TwapBot: React.FC = () => {
     const interval = parseInt(intervalSec);
 
     if (isNaN(total) || isNaN(numSlices) || isNaN(interval) || total <= 0 || numSlices < 1 || interval < 1) {
-      toast.error('Gecersiz parametreler');
+      toast.error('Invalid parameters');
       return;
     }
 
@@ -125,7 +125,7 @@ export const TwapBot: React.FC = () => {
         if (currentSlice >= numSlices) {
           runningRef.current = false;
           setStatus('STOPPED');
-          addLog({ time: new Date().toLocaleTimeString(), message: 'Tum slice\'lar tamamlandi. Bot durdu.' });
+          addLog({ time: new Date().toLocaleTimeString(), message: 'All slices completed. Bot stopped.' });
         }
         return;
       }
@@ -138,17 +138,16 @@ export const TwapBot: React.FC = () => {
       } else if (currentSlice >= numSlices) {
         runningRef.current = false;
         setStatus('STOPPED');
-        addLog({ time: new Date().toLocaleTimeString(), message: 'Tum slice\'lar tamamlandi. Bot durdu.' });
+        addLog({ time: new Date().toLocaleTimeString(), message: 'All slices completed. Bot stopped.' });
       }
     };
 
-    // Fetch real fee rates from API before starting
     (async () => {
       const feeRate = await fetchFeeRate(market);
       feeRateRef.current = feeRate;
       addLog({
         time: new Date().toLocaleTimeString(),
-        message: `TWAP baslatildi: ${numSlices} slice, ${interval}s aralik — Fee: maker ${(feeRate.makerFee * 100).toFixed(4)}%, taker ${(feeRate.takerFee * 100).toFixed(4)}%`,
+        message: `TWAP started: ${numSlices} slices, ${interval}s interval — Fee: maker ${(feeRate.makerFee * 100).toFixed(4)}%, taker ${(feeRate.takerFee * 100).toFixed(4)}%`,
       });
       runSlice();
     })();
@@ -169,7 +168,7 @@ export const TwapBot: React.FC = () => {
       timerRef.current = null;
     }
     setStatus('STOPPED');
-    addLog({ time: new Date().toLocaleTimeString(), message: 'Bot durduruldu' });
+    addLog({ time: new Date().toLocaleTimeString(), message: 'Bot stopped by user' });
   }, [addLog]);
 
   useEffect(() => {
@@ -190,8 +189,8 @@ export const TwapBot: React.FC = () => {
     <div className="flex h-[calc(100vh-52px)]">
       <ConfirmModal
         isOpen={showConfirm}
-        title="TWAP Bot Baslat"
-        message={`${symbol} icin TWAP ${side} emri baslatilacak.\nToplam: ${totalAmount}\nSlice: ${slices}\nAralik: ${intervalSec}s\nPiyasa: ${isSpot ? 'Spot' : 'Perps'}`}
+        title="Start TWAP Bot"
+        message={`TWAP ${side} order will start for ${symbol}.\nTotal: ${totalAmount}\nSlices: ${slices}\nInterval: ${intervalSec}s\nMarket: ${isSpot ? 'Spot' : 'Perps'}`}
         onConfirm={doStart}
         onCancel={() => setShowConfirm(false)}
       />
@@ -199,32 +198,32 @@ export const TwapBot: React.FC = () => {
       {/* Settings Panel */}
       <div className="w-80 border-r border-border bg-surface/30 backdrop-blur-sm p-5 flex flex-col gap-5 overflow-y-auto">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-sm">TWAP Ayarlari</h2>
+          <h2 className="font-semibold text-sm">TWAP Settings</h2>
           <StatusBadge status={status} />
         </div>
 
         <Input
-          label="Sembol"
+          label="Symbol"
           type="text"
           value={symbol}
           onChange={(e) => setSymbol(e.target.value)}
-          placeholder="BTC-USDC"
+          placeholder="BTC-USD"
           disabled={isRunning}
         />
 
         <Select
-          label="Yon"
+          label="Direction"
           value={side}
           onChange={(e) => setSide(e.target.value as 'BUY' | 'SELL')}
           disabled={isRunning}
           options={[
-            { value: 'BUY', label: 'Alis (BUY)' },
-            { value: 'SELL', label: 'Satis (SELL)' },
+            { value: 'BUY', label: 'Buy' },
+            { value: 'SELL', label: 'Sell' },
           ]}
         />
 
         <Input
-          label="Toplam Miktar"
+          label="Total Amount"
           type="number"
           value={totalAmount}
           onChange={(e) => setTotalAmount(e.target.value)}
@@ -233,14 +232,14 @@ export const TwapBot: React.FC = () => {
 
         <div className="grid grid-cols-2 gap-3">
           <Input
-            label="Slice Sayisi"
+            label="Slice Count"
             type="number"
             value={slices}
             onChange={(e) => setSlices(e.target.value)}
             disabled={isRunning}
           />
           <Input
-            label="Aralik (sn)"
+            label="Interval (sec)"
             type="number"
             value={intervalSec}
             onChange={(e) => setIntervalSec(e.target.value)}
@@ -250,7 +249,7 @@ export const TwapBot: React.FC = () => {
 
         {/* Market Toggle */}
         <div className="space-y-1.5">
-          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">Piyasa</label>
+          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">Market</label>
           <div className="flex gap-2">
             <button
               onClick={() => !isRunning && setIsSpot(true)}
@@ -270,11 +269,11 @@ export const TwapBot: React.FC = () => {
         <div className="mt-auto pt-4 border-t border-border">
           {!isRunning ? (
             <Button variant="primary" fullWidth size="lg" icon={<Play size={16} />} onClick={startBot}>
-              Baslat
+              Start
             </Button>
           ) : (
             <Button variant="danger" fullWidth size="lg" icon={<Square size={16} />} onClick={stopBot}>
-              Durdur
+              Stop
             </Button>
           )}
         </div>
@@ -284,22 +283,22 @@ export const TwapBot: React.FC = () => {
       <div className="flex-1 p-6 flex flex-col gap-5 overflow-y-auto">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <StatCard
-            label="Tamamlanan Slice"
+            label="Completed Slices"
             value={<span>{executedSlices}/{totalSlicesNum}</span>}
             icon={<Hash size={16} />}
           />
           <StatCard
-            label="Islem Hacmi"
+            label="Volume Executed"
             value={<NumberDisplay value={executedVolume} prefix="$" />}
             icon={<BarChart3 size={16} />}
           />
           <StatCard
-            label="Ort. Fiyat"
+            label="Avg. Price"
             value={<NumberDisplay value={avgPrice} />}
             icon={<DollarSign size={16} />}
           />
           <StatCard
-            label="Toplam Fee"
+            label="Total Fee"
             value={<NumberDisplay value={totalFee} prefix="$" />}
             icon={<Clock size={16} />}
           />
@@ -308,7 +307,7 @@ export const TwapBot: React.FC = () => {
         {/* Progress */}
         <div className="glass-card p-4">
           <div className="flex justify-between text-xs mb-2">
-            <span className="text-text-secondary">TWAP Ilerlemesi</span>
+            <span className="text-text-secondary">TWAP Progress</span>
             <span className="text-text-primary font-mono tabular-nums">
               {progress.toFixed(1)}%
             </span>
@@ -324,8 +323,8 @@ export const TwapBot: React.FC = () => {
         {/* Log */}
         <div className="flex-1 glass-card flex flex-col overflow-hidden p-0">
           <div className="px-5 py-3 border-b border-border flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Log Kayitlari</span>
-            <span className="text-[10px] text-text-muted">{logs.length} kayit</span>
+            <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Activity Log</span>
+            <span className="text-[10px] text-text-muted">{logs.length} entries</span>
           </div>
           <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-1">
             {logs.map((log, i) => (
@@ -351,7 +350,7 @@ export const TwapBot: React.FC = () => {
               <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
                 <div className="text-center">
                   <Clock size={32} className="mx-auto mb-3 opacity-30" />
-                  <p>TWAP log kayitlari burada gorunecektir.</p>
+                  <p>TWAP activity logs will appear here.</p>
                 </div>
               </div>
             )}

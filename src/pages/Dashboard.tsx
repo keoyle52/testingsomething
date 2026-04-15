@@ -81,7 +81,6 @@ export const Dashboard: React.FC = () => {
           const size = Math.abs(rawSize);
           const entryPrice = parseFloat(pos.avgEntryPrice ?? pos.entryPrice ?? pos.avgPrice ?? 0);
           const markPrice = priceMap[pos.symbol] ?? parseFloat(pos.markPrice ?? 0);
-          // SoDEX position side is always BOTH: positive size = long, negative = short
           const side = (pos.side === 1 || pos.side === 'BUY' || pos.side === 'LONG' || (pos.side !== 'SHORT' && rawSize >= 0)) ? 1 : -1;
           pnl += side * size * (markPrice - entryPrice);
         }
@@ -113,12 +112,12 @@ export const Dashboard: React.FC = () => {
         <div>
           <h1 className="text-lg font-semibold">Dashboard</h1>
           <p className="text-xs text-text-muted mt-0.5">
-            {isTestnet ? 'Testnet' : 'Mainnet'} - Genel Bakis
+            {isTestnet ? 'Testnet' : 'Mainnet'} — Overview
           </p>
         </div>
         <div className="badge badge-primary">
           <Activity size={11} />
-          {loading ? 'Yikleniyor...' : 'Canli'}
+          {loading ? 'Loading...' : 'Live'}
         </div>
       </div>
 
@@ -126,7 +125,7 @@ export const Dashboard: React.FC = () => {
       {hasKeys && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 shrink-0">
           <StatCard
-            label="Bakiye"
+            label="Balance"
             value={<NumberDisplay value={balance} prefix="$" />}
             icon={<Wallet size={16} />}
           />
@@ -143,12 +142,12 @@ export const Dashboard: React.FC = () => {
             trend={totalPnl >= 0 ? (totalPnl > 0 ? 'up' : 'neutral') : 'down'}
           />
           <StatCard
-            label="Acik Pozisyon"
+            label="Open Positions"
             value={<NumberDisplay value={positionsCount} decimals={0} />}
             icon={<Layers size={16} />}
           />
           <StatCard
-            label="Izlenen Piyasa"
+            label="Markets Tracked"
             value={<NumberDisplay value={tickers.length} decimals={0} />}
             icon={<BarChart3 size={16} />}
           />
@@ -158,7 +157,7 @@ export const Dashboard: React.FC = () => {
       {/* Chart */}
       <div className="shrink-0">
         <TradingChart
-          symbol={defaultSymbol || 'BTC-USDC'}
+          symbol={defaultSymbol || 'BTC-USD'}
           market="perps"
           height={300}
         />
@@ -168,18 +167,18 @@ export const Dashboard: React.FC = () => {
       <div className="flex-1 min-h-0 glass-card flex flex-col overflow-hidden p-0">
         <div className="px-4 md:px-5 py-3 border-b border-border flex items-center justify-between">
           <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
-            Piyasa Ozeti
+            Market Overview
           </span>
-          <span className="badge badge-neutral">{tickers.length} pair</span>
+          <span className="badge badge-neutral">{tickers.length} pairs</span>
         </div>
         <div className="overflow-auto flex-1">
           <table className="data-table text-sm text-left whitespace-nowrap">
             <thead className="text-[11px] text-text-muted uppercase tracking-wider border-b border-border">
               <tr>
-                <th className="px-4 md:px-5 py-3 font-medium">Sembol</th>
-                <th className="px-4 md:px-5 py-3 font-medium text-right">Fiyat</th>
-                <th className="px-4 md:px-5 py-3 font-medium text-right">24h Degisim</th>
-                <th className="px-4 md:px-5 py-3 font-medium text-right hidden md:table-cell">24h Hacim</th>
+                <th className="px-4 md:px-5 py-3 font-medium">Symbol</th>
+                <th className="px-4 md:px-5 py-3 font-medium text-right">Price</th>
+                <th className="px-4 md:px-5 py-3 font-medium text-right">24h Change</th>
+                <th className="px-4 md:px-5 py-3 font-medium text-right hidden md:table-cell">24h Volume</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/50">
@@ -188,14 +187,14 @@ export const Dashboard: React.FC = () => {
                   <td colSpan={4} className="px-5 py-12 text-center">
                     <div className="flex flex-col items-center gap-3 text-text-muted">
                       <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                      <span className="text-sm">Yikleniyor...</span>
+                      <span className="text-sm">Loading...</span>
                     </div>
                   </td>
                 </tr>
               ) : tickers.length === 0 ? (
                 <tr>
                   <td colSpan={4} className="px-5 py-12 text-center text-text-muted text-sm">
-                    Piyasa verisi bulunamadi
+                    No market data available
                   </td>
                 </tr>
               ) : (

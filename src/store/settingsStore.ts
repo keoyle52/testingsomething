@@ -23,7 +23,7 @@ export const useSettingsStore = create<SettingsState>()(
       apiKeyName: '',
       privateKey: '',
       isTestnet: true,
-      defaultSymbol: 'BTC-USDC',
+      defaultSymbol: 'BTC-USD',
       confirmOrders: true,
       toastsEnabled: true,
       setApiKeyName: (val) => set({ apiKeyName: val }),

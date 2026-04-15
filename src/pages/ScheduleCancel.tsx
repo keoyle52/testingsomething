@@ -16,9 +16,9 @@ interface TriggerRecord {
 }
 
 const SCOPE_LABELS: Record<CancelScope, string> = {
-  all: 'Tümü',
-  perps: 'Sadece Perps',
-  spot: 'Sadece Spot',
+  all: 'All',
+  perps: 'Perps Only',
+  spot: 'Spot Only',
 };
 
 const CIRCLE_SIZE = 200;
@@ -60,17 +60,17 @@ export const ScheduleCancel: React.FC = () => {
         totalCancelled += Array.isArray(spotResults) ? spotResults.filter((r) => !(r as Record<string, unknown>).error).length : 0;
       }
 
-      const resultMsg = `${totalCancelled} emir iptal edildi`;
+      const resultMsg = `${totalCancelled} order(s) cancelled`;
       toast.success(`✅ ${resultMsg} (${SCOPE_LABELS[scope]})`);
       addHistory({
-        timestamp: new Date().toLocaleString('tr-TR'),
+        timestamp: new Date().toLocaleString(),
         scope,
         result: resultMsg,
         status: 'success',
       });
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : 'Bilinmeyen hata';
-      toast.error(`❌ İptal başarısız: ${errMsg}`);
+      const errMsg = err instanceof Error ? err.message : 'Unknown error';
+      toast.error(`❌ Cancellation failed: ${errMsg}`);
       addHistory({
         timestamp: new Date().toLocaleString('tr-TR'),
         scope,
@@ -109,7 +109,7 @@ export const ScheduleCancel: React.FC = () => {
       setPreviewCount(count);
     } catch {
       setPreviewCount(null);
-      toast.error('Açık emir sayısı alınamadı');
+      toast.error('Could not retrieve open order count');
     } finally {
       setLoadingPreview(false);
     }
@@ -149,8 +149,8 @@ export const ScheduleCancel: React.FC = () => {
     <div className="p-6 h-[calc(100vh-52px)] flex overflow-hidden">
       <ConfirmModal
         isOpen={showConfirm}
-        title="Dead Man's Switch Etkinleştir"
-        message={`Süre dolduğunda "${SCOPE_LABELS[cancelScope]}" kapsamındaki tüm açık emirler otomatik iptal edilecek.\n\nSüre: ${parseInt(timeoutPeriod) >= 60 ? `${Math.floor(parseInt(timeoutPeriod) / 60)} dakika` : `${timeoutPeriod} saniye`}\n\nDevam etmek istiyor musunuz?`}
+        title="Activate Dead Man's Switch"
+        message={`When the timer expires, all open orders within "${SCOPE_LABELS[cancelScope]}" scope will be automatically cancelled.\n\nTimeout: ${parseInt(timeoutPeriod) >= 60 ? `${Math.floor(parseInt(timeoutPeriod) / 60)} minute(s)` : `${timeoutPeriod} second(s)`}\n\nContinue?`}
         onConfirm={activate}
         onCancel={() => setShowConfirm(false)}
       />
@@ -164,17 +164,17 @@ export const ScheduleCancel: React.FC = () => {
             </div>
             <div>
               <h2 className="text-lg font-semibold">{"Dead Man's Switch"}</h2>
-              <p className="text-[11px] text-text-muted">Otomatik emir iptal koruma sistemi</p>
+              <p className="text-[11px] text-text-muted">Automatic order cancellation safety switch</p>
             </div>
           </div>
           <p className="text-xs text-text-secondary leading-relaxed">
-            Bu süre içinde işlem yapmazsanız tüm emirleriniz otomatik olarak iptal edilir.
+            If you stop trading within this time, all your orders will be automatically cancelled.
           </p>
         </div>
 
         {/* Scope Selection */}
         <div className="space-y-2">
-          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">İptal Kapsamı</label>
+          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">Cancel Scope</label>
           <div className="flex flex-col gap-1.5">
             {(['all', 'perps', 'spot'] as CancelScope[]).map((scope) => (
               <button
@@ -195,7 +195,7 @@ export const ScheduleCancel: React.FC = () => {
 
         {/* Timeout */}
         <div className="space-y-2">
-          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">Timeout Süresi</label>
+          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">Timeout Duration</label>
           <div className="grid grid-cols-3 gap-1.5">
             {[
               { label: '30s', value: '30' },
@@ -224,16 +224,16 @@ export const ScheduleCancel: React.FC = () => {
         {/* Preview */}
         {!isActive && (
           <Button variant="ghost" size="sm" icon={<Search size={14} />} onClick={fetchPreview} loading={loadingPreview}>
-            {previewCount !== null ? `${previewCount} açık emir` : 'Açık emirleri kontrol et'}
+            {previewCount !== null ? `${previewCount} open orders` : 'Check open orders'}
           </Button>
         )}
 
         {/* History */}
         <div className="flex-1 min-h-0">
-          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-2">Geçmiş</label>
+          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-2">History</label>
           {history.length === 0 ? (
             <div className="glass-card p-3 text-center text-[11px] text-text-muted">
-              Henüz geçmiş yok.
+              No history yet.
             </div>
           ) : (
             <div className="glass-card p-0 max-h-48 overflow-y-auto divide-y divide-border/50">
@@ -241,7 +241,7 @@ export const ScheduleCancel: React.FC = () => {
                 <div key={idx} className="flex items-center justify-between px-3 py-2 text-[11px]">
                   <span className="text-text-muted tabular-nums">{entry.timestamp}</span>
                   <span className={`badge ${entry.status === 'success' ? 'badge-success' : 'badge-danger'}`}>
-                    {entry.status === 'success' ? 'OK' : 'HATA'}
+                    {entry.status === 'success' ? 'OK' : 'ERROR'}
                   </span>
                 </div>
               ))}
@@ -290,7 +290,7 @@ export const ScheduleCancel: React.FC = () => {
             </span>
             {isActive && (
               <span className="text-[10px] text-text-muted mt-1 uppercase tracking-wider">
-                {isUrgent ? 'Kritik!' : 'Aktif'}
+                {isUrgent ? 'Critical!' : 'Active'}
               </span>
             )}
           </div>
@@ -306,7 +306,7 @@ export const ScheduleCancel: React.FC = () => {
                 : 'bg-primary/15 text-primary border-primary/50 hover:bg-primary/25 glow-primary'
             }`}
           >
-            {isActive ? 'DEVRE DIŞI BIRAK' : 'ETKİNLEŞTİR'}
+            {isActive ? 'DEACTIVATE' : 'ACTIVATE'}
           </button>
         </div>
       </div>

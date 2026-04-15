@@ -112,7 +112,7 @@ export const CopyTrader: React.FC = () => {
         await placeOrder(params, market);
         setSuccessCount((p) => p + 1);
         addLog({
-          timestamp: new Date().toLocaleTimeString('tr-TR'),
+          timestamp: new Date().toLocaleTimeString(),
           symbol: order.symbol,
           side: sideLabel,
           amount: qty.toFixed(4),
@@ -123,7 +123,7 @@ export const CopyTrader: React.FC = () => {
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : 'Unknown error';
         addLog({
-          timestamp: new Date().toLocaleTimeString('tr-TR'),
+          timestamp: new Date().toLocaleTimeString(),
           symbol: order.symbol,
           side: sideLabel,
           amount: qty.toFixed(4),
@@ -131,7 +131,7 @@ export const CopyTrader: React.FC = () => {
           market,
           error: errorMsg,
         });
-        toast.error(`Kopya başarısız: ${order.symbol} - ${errorMsg}`);
+        toast.error(`Copy failed: ${order.symbol} - ${errorMsg}`);
       }
     },
     [copyRatio, maxSize, delay, addLog],
@@ -171,7 +171,7 @@ export const CopyTrader: React.FC = () => {
         }
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : 'Polling error';
-        toast.error(`Hedef izleme hatası (${market}): ${errorMsg}`);
+        toast.error(`Target tracking error (${market}): ${errorMsg}`);
       }
     },
     [targetAddress, copyOrder],
@@ -193,11 +193,11 @@ export const CopyTrader: React.FC = () => {
 
   const startBot = useCallback(() => {
     if (!targetAddress.trim()) {
-      toast.error('Hedef cüzdan adresi giriniz.');
+      toast.error('Enter a target wallet address.');
       return;
     }
     if (!ethers.isAddress(targetAddress.trim())) {
-      toast.error('Geçersiz Ethereum adresi formatı.');
+      toast.error('Invalid Ethereum address format.');
       return;
     }
 
@@ -209,7 +209,7 @@ export const CopyTrader: React.FC = () => {
     setTotalAttempts(0);
     isRunningRef.current = true;
     setStatus('RUNNING');
-    toast.success('Copy Trader başlatıldı.');
+    toast.success('Copy Trader started.');
 
     const markets: ('spot' | 'perps')[] =
       marketType === 'BOTH'
@@ -252,7 +252,7 @@ export const CopyTrader: React.FC = () => {
       intervalRef.current = null;
     }
     setStatus('STOPPED');
-    toast('Copy Trader durduruldu.', { icon: '⏹️' });
+    toast('Copy Trader stopped.', { icon: '⏹️' });
   }, []);
 
   useEffect(() => {
@@ -283,8 +283,8 @@ export const CopyTrader: React.FC = () => {
     <div className="flex h-[calc(100vh-52px)]">
       <ConfirmModal
         isOpen={showConfirm}
-        title="Copy Trader Başlat"
-        message={`Hedef: ${targetAddress}\nOran: %${copyRatio} | Max: ${maxSize} USDC\nMarket: ${marketType} | Gecikme: ${delay}ms\n\nBaşlatmak istediğinize emin misiniz?`}
+        title="Start Copy Trader"
+        message={`Target: ${targetAddress}\nRatio: ${copyRatio}% | Max: ${maxSize} USDC\nMarket: ${marketType} | Delay: ${delay}ms\n\nAre you sure you want to start?`}
         onConfirm={startBot}
         onCancel={() => setShowConfirm(false)}
       />
@@ -292,12 +292,12 @@ export const CopyTrader: React.FC = () => {
       {/* Settings Panel */}
       <div className="w-80 border-r border-border bg-surface/30 backdrop-blur-sm p-5 flex flex-col gap-5 overflow-y-auto">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-sm">Ayarlar</h2>
+          <h2 className="font-semibold text-sm">Settings</h2>
           <StatusBadge status={status} />
         </div>
 
         <Input
-          label="Hedef Cüzdan"
+          label="Target Wallet"
           type="text"
           value={targetAddress}
           onChange={(e) => setTargetAddress(e.target.value)}
@@ -307,14 +307,14 @@ export const CopyTrader: React.FC = () => {
 
         <div className="grid grid-cols-2 gap-3">
           <Input
-            label="Kopya Oranı (%)"
+            label="Copy Ratio (%)"
             type="number"
             value={copyRatio}
             onChange={(e) => setCopyRatio(e.target.value)}
             disabled={isRunning}
           />
           <Input
-            label="Max Boyut (USDC)"
+            label="Max Size (USDC)"
             type="number"
             value={maxSize}
             onChange={(e) => setMaxSize(e.target.value)}
@@ -329,13 +329,13 @@ export const CopyTrader: React.FC = () => {
             onChange={(e) => setMarketType(e.target.value as 'BOTH' | 'SPOT' | 'PERPS')}
             disabled={isRunning}
             options={[
-              { value: 'BOTH', label: 'Her İkisi' },
-              { value: 'SPOT', label: 'Sadece Spot' },
-              { value: 'PERPS', label: 'Sadece Perps' },
+              { value: 'BOTH', label: 'Both' },
+              { value: 'SPOT', label: 'Spot Only' },
+              { value: 'PERPS', label: 'Perps Only' },
             ]}
           />
           <Input
-            label="Gecikme (ms)"
+            label="Delay (ms)"
             type="number"
             value={delay}
             onChange={(e) => setDelay(e.target.value)}
@@ -346,11 +346,11 @@ export const CopyTrader: React.FC = () => {
         <div className="mt-auto pt-4 border-t border-border">
           {!isRunning ? (
             <Button variant="primary" fullWidth size="lg" icon={<Play size={16} />} onClick={handleStart}>
-              Başlat
+              Start
             </Button>
           ) : (
             <Button variant="danger" fullWidth size="lg" icon={<Square size={16} />} onClick={stopBot}>
-              Durdur
+              Stop
             </Button>
           )}
         </div>
@@ -362,18 +362,18 @@ export const CopyTrader: React.FC = () => {
         <div className="w-1/2 border-r border-border p-6 flex flex-col gap-4 overflow-hidden">
           <div className="flex items-center gap-2">
             <Eye size={16} className="text-primary" />
-            <h3 className="text-sm font-semibold">Hedef Cüzdan Analizi</h3>
+            <h3 className="text-sm font-semibold">Target Wallet Analysis</h3>
           </div>
 
           {targetAddress ? (
             <>
               <div className="grid grid-cols-2 gap-3 shrink-0">
                 <div className="stat-card !p-3">
-                  <div className="text-[10px] text-text-muted uppercase mb-1">Tespit Edilen</div>
+                  <div className="text-[10px] text-text-muted uppercase mb-1">Detected</div>
                   <NumberDisplay value={targetOrders.length} decimals={0} className="text-lg font-semibold" />
                 </div>
                 <div className="stat-card !p-3">
-                  <div className="text-[10px] text-text-muted uppercase mb-1">Son Tespit</div>
+                  <div className="text-[10px] text-text-muted uppercase mb-1">Last Detected</div>
                   {lastDetected ? (
                     <span className="text-xs font-mono">
                       <span className={lastDetected.side === 1 ? 'text-success' : 'text-danger'}>
@@ -411,7 +411,7 @@ export const CopyTrader: React.FC = () => {
                   </div>
                 ) : (
                   <div className="flex-1 flex items-center justify-center text-text-muted text-xs">
-                    {isRunning ? 'Emirler izleniyor...' : 'API verisi bekleniyor...'}
+                    {isRunning ? 'Monitoring orders...' : 'Waiting for API data...'}
                   </div>
                 )}
               </div>
@@ -420,7 +420,7 @@ export const CopyTrader: React.FC = () => {
             <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
               <div className="text-center">
                 <Users size={32} className="mx-auto mb-3 opacity-30" />
-                <p>İzlemek için bir hedef cüzdan adresi girin.</p>
+                <p>Enter a target wallet address to monitor.</p>
               </div>
             </div>
           )}
@@ -430,7 +430,7 @@ export const CopyTrader: React.FC = () => {
         <div className="w-1/2 p-6 flex flex-col gap-4 overflow-hidden">
           <div className="flex items-center gap-2">
             <Users size={16} className="text-primary" />
-            <h3 className="text-sm font-semibold">Kopyalanan İşlemler</h3>
+            <h3 className="text-sm font-semibold">Copied Trades</h3>
           </div>
 
           <div className="grid grid-cols-2 gap-3 shrink-0">
@@ -447,7 +447,7 @@ export const CopyTrader: React.FC = () => {
               trend={pnlTrend}
             />
             <StatCard
-              label="Başarı Oranı"
+              label="Success Rate"
               value={<NumberDisplay value={successRate} suffix="%" />}
               icon={<CheckCircle2 size={14} />}
             />
@@ -455,10 +455,10 @@ export const CopyTrader: React.FC = () => {
 
           <div className="flex-1 glass-card flex flex-col overflow-hidden p-0">
             <div className="px-4 py-2.5 border-b border-border flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Log Kayıtları</span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Activity Log</span>
               {copyLogs.length > 0 && (
                 <span className="text-[10px] text-text-muted">
-                  {successCount}/{totalAttempts} başarılı
+                  {successCount}/{totalAttempts} successful
                 </span>
               )}
             </div>
@@ -484,7 +484,7 @@ export const CopyTrader: React.FC = () => {
               </div>
             ) : (
               <div className="flex-1 flex items-center justify-center text-text-muted text-xs">
-                Henüz bir işlem kopyalanmadı.
+                No trades copied yet.
               </div>
             )}
           </div>

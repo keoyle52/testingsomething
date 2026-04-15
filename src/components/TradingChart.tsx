@@ -24,6 +24,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const [selectedInterval, setSelectedInterval] = useState<string>('1h');
   const [loading, setLoading] = useState(true);
 
+  // Initialize chart + series together in one effect to avoid race condition
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -79,8 +80,10 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       chartRef.current = null;
       seriesRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [height]);
 
+  // Load/refresh data whenever symbol, interval, or market changes
   useEffect(() => {
     let cancelled = false;
 
@@ -90,26 +93,35 @@ export const TradingChart: React.FC<TradingChartProps> = ({
         const rawKlines = await fetchKlines(symbol, selectedInterval, 200, market);
         if (cancelled || !seriesRef.current) return;
 
-        const klines = Array.isArray(rawKlines) ? rawKlines : [];
-        const candlesticks: CandlestickData<Time>[] = klines
-          .filter((k: Record<string, unknown>) => {
-            // Skip klines with missing essential data
-            const hasTime = k.time != null || k.openTime != null;
-            const hasPrice = k.open != null || k.close != null;
-            return hasTime && hasPrice;
-          })
-          .map((k: Record<string, unknown>) => ({
-            time: (typeof k.time === 'number' ? k.time / 1000 : Math.floor(new Date(String(k.time ?? k.openTime ?? 0)).getTime() / 1000)) as Time,
-            open: parseFloat(String(k.open ?? k.close ?? 0)),
-            high: parseFloat(String(k.high ?? k.open ?? k.close ?? 0)),
-            low: parseFloat(String(k.low ?? k.open ?? k.close ?? 0)),
-            close: parseFloat(String(k.close ?? k.open ?? 0)),
-          }));
 
-        if (candlesticks.length > 0) {
+        const klines = Array.isArray(rawKlines) ? rawKlines : [];
+
+        /** Convert any timestamp value (ms-number, s-number, or string of either) → Unix seconds */
+        const toUnixSeconds = (v: unknown): number => {
+          const n = typeof v === 'number' ? v : parseFloat(String(v ?? '0'));
+          if (!isFinite(n) || n <= 0) return 0;
+          // If > 1e12 it is in milliseconds, otherwise already in seconds
+          return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n);
+        };
+
+        const candlesticks: CandlestickData<Time>[] = klines
+          .map((k: Record<string, unknown>) => {
+            const ts = toUnixSeconds(k.time ?? k.openTime ?? k.t);
+            const o = parseFloat(String(k.open ?? k.o ?? k.close ?? k.c ?? 0));
+            const h = parseFloat(String(k.high ?? k.h ?? k.open ?? k.o ?? 0));
+            const l = parseFloat(String(k.low  ?? k.l ?? k.open ?? k.o ?? 0));
+            const c = parseFloat(String(k.close ?? k.c ?? k.open ?? k.o ?? 0));
+            return { ts, o, h, l, c };
+          })
+          .filter((x) => x.ts > 0 && x.o > 0 && x.c > 0)
+          .sort((a, b) => a.ts - b.ts)
+          .map((x) => ({ time: x.ts as Time, open: x.o, high: x.h, low: x.l, close: x.c }));
+
+        if (candlesticks.length > 0 && seriesRef.current) {
           seriesRef.current.setData(candlesticks);
           chartRef.current?.timeScale().fitContent();
         }
+
       } catch {
         // Chart data load failed silently
       } finally {
@@ -117,11 +129,13 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       }
     };
 
-    loadData();
+    // Small delay to ensure chart/series are mounted before first fetch
+    const init = setTimeout(loadData, 50);
     const timer = globalThis.setInterval(loadData, 30_000);
 
     return () => {
       cancelled = true;
+      clearTimeout(init);
       clearInterval(timer);
     };
   }, [symbol, selectedInterval, market]);

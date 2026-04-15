@@ -12,9 +12,9 @@ import { Button } from '../components/common/Button';
 import { cn } from '../lib/utils';
 
 const TABS = [
-  { id: 'api' as const, label: 'API Bağlantısı', icon: Key },
-  { id: 'preferences' as const, label: 'Tercihler', icon: Settings2 },
-  { id: 'about' as const, label: 'Hakkında', icon: Info },
+  { id: 'api' as const, label: 'API Connection', icon: Key },
+  { id: 'preferences' as const, label: 'Preferences', icon: Settings2 },
+  { id: 'about' as const, label: 'About', icon: Info },
 ];
 
 export const Settings: React.FC = () => {
@@ -37,15 +37,15 @@ export const Settings: React.FC = () => {
 
   const handleTestConnection = async () => {
     if (!evmAddress) {
-      toast.error('Geçerli bir Private Key giriniz.');
+      toast.error('Enter a valid Private Key.');
       return;
     }
     try {
       await spotClient.get(`/accounts/${evmAddress}/balances`);
-      toast.success('Bağlantı başarılı!');
+      toast.success('Connection successful!');
     } catch (error: unknown) {
       const e = error as { response?: { data?: { message?: string } } };
-      toast.error(e?.response?.data?.message || 'Bağlantı başarısız.');
+      toast.error(e?.response?.data?.message || 'Connection failed.');
     }
   };
 
@@ -78,16 +78,16 @@ export const Settings: React.FC = () => {
               <Card>
                 <div className="flex items-center gap-2 mb-5">
                   <Shield size={16} className="text-primary" />
-                  <h3 className="text-sm font-semibold">API Yapılandırması</h3>
+                  <h3 className="text-sm font-semibold">API Configuration</h3>
                 </div>
 
-                <div className="space-y-4">
+                <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
                   <Input
-                    label="API Key Adı"
+                    label="API Key Name"
                     type="text"
                     value={store.apiKeyName}
                     onChange={(e) => store.setApiKeyName(e.target.value)}
-                    placeholder="Örn: test-key-1"
+                    placeholder="e.g. test-key-1"
                     icon={<Key size={14} />}
                   />
 
@@ -97,24 +97,24 @@ export const Settings: React.FC = () => {
                     value={store.privateKey}
                     onChange={(e) => store.setPrivateKey(e.target.value)}
                     placeholder="0x..."
-                    hint="Anahtarınız yalnızca tarayıcınızda saklanır, hiçbir sunucuya gönderilmez."
+                    hint="Your key is stored only in your browser and never sent to any server."
                   />
 
                   <div className="space-y-1.5">
                     <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">
-                      Türetilen EVM Adresi
+                      Derived EVM Address
                     </label>
                     <div className="w-full bg-background/60 border border-border rounded-lg px-3 py-2.5 text-sm text-text-muted font-mono truncate">
-                      {evmAddress || 'Private key girilince görünür...'}
+                      {evmAddress || 'Will appear once a valid private key is entered...'}
                     </div>
                   </div>
-                </div>
+                </form>
               </Card>
 
               <Card>
                 <div className="flex items-center gap-2 mb-5">
                   <Globe size={16} className="text-primary" />
-                  <h3 className="text-sm font-semibold">Ağ Seçimi</h3>
+                  <h3 className="text-sm font-semibold">Network</h3>
                 </div>
 
                 <div className="flex gap-2">
@@ -150,7 +150,7 @@ export const Settings: React.FC = () => {
                   <div className="mt-3 flex items-start gap-2 p-3 bg-warning/5 border border-warning/20 rounded-lg">
                     <Info size={14} className="text-warning shrink-0 mt-0.5" />
                     <p className="text-xs text-warning leading-relaxed">
-                      Mainnet modundasınız. Gerçek varlıklarla işlem yapılacaktır.
+                      You are in Mainnet mode. Real assets will be used in transactions.
                     </p>
                   </div>
                 )}
@@ -162,7 +162,7 @@ export const Settings: React.FC = () => {
                   icon={<Wifi size={14} />}
                   onClick={handleTestConnection}
                 >
-                  Bağlantıyı Test Et
+                  Test Connection
                 </Button>
                 <Button
                   variant="danger"
@@ -170,7 +170,7 @@ export const Settings: React.FC = () => {
                   onClick={store.disconnect}
                   className="ml-auto"
                 >
-                  Bağlantıyı Kes
+                  Disconnect
                 </Button>
               </div>
             </div>
@@ -181,32 +181,32 @@ export const Settings: React.FC = () => {
               <Card>
                 <div className="flex items-center gap-2 mb-5">
                   <Hash size={16} className="text-primary" />
-                  <h3 className="text-sm font-semibold">Varsayılan Değerler</h3>
+                  <h3 className="text-sm font-semibold">Defaults</h3>
                 </div>
                 <Input
-                  label="Varsayılan Sembol"
+                  label="Default Symbol"
                   type="text"
                   value={store.defaultSymbol}
                   onChange={(e) => store.setDefaultSymbol(e.target.value)}
-                  placeholder="BTC-USDC"
+                  placeholder="BTC-USD"
                 />
               </Card>
 
               <Card>
                 <div className="flex items-center gap-2 mb-5">
                   <Bell size={16} className="text-primary" />
-                  <h3 className="text-sm font-semibold">Bildirimler ve Onaylar</h3>
+                  <h3 className="text-sm font-semibold">Notifications & Confirmations</h3>
                 </div>
                 <div className="space-y-3">
                   <Toggle
-                    label="Emir Onay Dialog'u"
-                    description="Emir vermeden önce onay modalı göster"
+                    label="Order Confirmation Dialog"
+                    description="Show confirmation modal before placing orders"
                     checked={store.confirmOrders}
                     onChange={store.setConfirmOrders}
                   />
                   <Toggle
-                    label="Toast Bildirimleri"
-                    description="İşlem sonuçlarını bildirim olarak göster"
+                    label="Toast Notifications"
+                    description="Show order results as toast notifications"
                     checked={store.toastsEnabled}
                     onChange={store.setToastsEnabled}
                   />
@@ -225,8 +225,8 @@ export const Settings: React.FC = () => {
                   <div>
                     <h2 className="text-lg font-semibold gradient-text inline-block">SoDEX Toolset Terminal</h2>
                     <p className="text-sm text-text-secondary mt-2 leading-relaxed">
-                      Bu uygulama SoDEX DEX üzerinde ileri düzey algoritmik işlemler (Grid Bot, Volume Bot)
-                      ve cüzdan yönetimi için tasarlanmış profesyonel bir araç takımıdır.
+                      A professional-grade toolset for advanced algorithmic trading on SoDEX DEX,
+                      featuring Grid Bot, TWAP Bot, DCA Bot, Copy Trading, and portfolio monitoring.
                     </p>
                     <div className="mt-4 pt-4 border-t border-border">
                       <div className="badge badge-primary">v1.0.0</div>

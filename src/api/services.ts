@@ -147,12 +147,19 @@ const DEFAULT_STEP_SIZE = 0.00000001;
  */
 function roundToTick(value: number, tickSize: number, precision: number): string {
   if (tickSize <= 0 || precision < 0) return value.toFixed(Math.max(0, precision));
-  const factor = Math.pow(10, precision);
-  const tickUnits = Math.round(tickSize * factor);
-  const valueUnits = Math.floor(value * factor);
-  const remainder = valueUnits % tickUnits;
-  const rounded = (valueUnits - remainder) / factor;
-  return rounded.toFixed(precision);
+  // Use string-based integer arithmetic to avoid floating-point drift.
+  // e.g. tickSize=0.001, precision=3 → factor=1000, tickUnits=1
+  const safePrec = Math.max(0, Math.min(precision, 10));
+  const factor = Math.pow(10, safePrec);
+  const tickUnits = Math.max(1, Math.round(tickSize * factor));
+  const valueUnits = Math.floor(value * factor + Number.EPSILON);
+  const aligned = Math.floor(valueUnits / tickUnits) * tickUnits;
+  if (aligned <= 0) {
+    // Value was smaller than one tick — floor to exactly one tick so the order
+    // doesn't fail with quantity=0.
+    return (tickUnits / factor).toFixed(safePrec);
+  }
+  return (aligned / factor).toFixed(safePrec);
 }
 
 /**
@@ -431,6 +438,7 @@ async function placeSpotOrder(params: PlaceOrderParams): Promise<unknown> {
 
   // Round price and quantity to exchange-required precision/tick multiples
   const rawQty = parseFloat(params.quantity);
+  if (isNaN(rawQty) || rawQty <= 0) throw new Error(`placeSpotOrder: invalid quantity "${params.quantity}"`);
   const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
   const price = params.price !== undefined
     ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
@@ -489,6 +497,7 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<unknown> {
 
   // Round price and quantity to exchange-required precision/tick multiples
   const rawQty = parseFloat(params.quantity);
+  if (isNaN(rawQty) || rawQty <= 0) throw new Error(`placePerpsOrder: invalid quantity "${params.quantity}"`);
   const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
   const price = params.price !== undefined
     ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)

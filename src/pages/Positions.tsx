@@ -112,17 +112,17 @@ export const Positions: React.FC = () => {
         { symbol: pos.symbol, side: closeSide as 1 | 2, type: 2, quantity: String(pos.size) },
         'perps',
       );
-      toast.success(`${pos.symbol} pozisyonu kapatıldı`);
+      toast.success(`${pos.symbol} position closed`);
       loadData();
     } catch (err: unknown) {
-      toast.error(getErrorMessage(err, 'Pozisyon kapatılamadı'));
+      toast.error(getErrorMessage(err, 'Failed to close position'));
     }
   }, [loadData]);
 
   const handleClose = useCallback((pos: PositionRow) => {
     if (confirmOrders) {
-      setConfirmTitle('Pozisyonu Kapat');
-      setConfirmMessage(`${pos.symbol} ${pos.side} ${pos.size} pozisyonunu kapatmak istediğinize emin misiniz?`);
+      setConfirmTitle('Close Position');
+      setConfirmMessage(`Are you sure you want to close ${pos.symbol} ${pos.side} ${pos.size} position?`);
       confirmActionRef.current = () => executeClose(pos);
       setConfirmOpen(true);
     } else {
@@ -134,15 +134,15 @@ export const Positions: React.FC = () => {
     const results = await Promise.allSettled(positions.map((pos) => executeClose(pos)));
     const failures = results.filter((r) => r.status === 'rejected');
     if (failures.length > 0) {
-      toast.error(`${failures.length} pozisyon kapatılamadı`);
+      toast.error(`${failures.length} position(s) could not be closed`);
     }
   }, [positions, executeClose]);
 
   const handleCloseAll = useCallback(() => {
     if (positions.length === 0) return;
     if (confirmOrders) {
-      setConfirmTitle('Tüm Pozisyonları Kapat');
-      setConfirmMessage(`${positions.length} açık pozisyonun tamamını kapatmak istediğinize emin misiniz?`);
+      setConfirmTitle('Close All Positions');
+      setConfirmMessage(`Are you sure you want to close all ${positions.length} open positions?`);
       confirmActionRef.current = () => executeCloseAll();
       setConfirmOpen(true);
     } else {
@@ -174,14 +174,14 @@ export const Positions: React.FC = () => {
           trend={totalPnl >= 0 ? 'up' : 'down'}
         />
         <StatCard
-          label="Pozisyon Değeri"
+          label="Position Value"
           value={<NumberDisplay value={totalValue} prefix="$" />}
           icon={<BarChart3 size={16} />}
         />
         <div className="stat-card">
           <div className="flex items-start justify-between gap-2">
             <div className="flex-1">
-              <div className="text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-2">Margin Kullanımı</div>
+              <div className="text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-2">Margin Usage</div>
               <div className="text-xl font-semibold font-mono tabular-nums">{marginUsage.toFixed(0)}%</div>
             </div>
             <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
@@ -206,13 +206,13 @@ export const Positions: React.FC = () => {
         <div className="flex items-center justify-between px-5 py-3 border-b border-border">
           <div className="flex items-center gap-3">
             <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
-              Açık Pozisyonlar
+              Open Positions
             </span>
             <span className="badge badge-primary">{positions.length}</span>
           </div>
           {positions.length > 0 && (
             <Button variant="danger" size="sm" icon={<XIcon size={12} />} onClick={handleCloseAll}>
-              Tümünü Kapat
+              Close All
             </Button>
           )}
         </div>
@@ -220,15 +220,15 @@ export const Positions: React.FC = () => {
           <table className="data-table text-sm text-left whitespace-nowrap">
             <thead className="text-[11px] text-text-muted uppercase tracking-wider border-b border-border">
               <tr>
-                <th className="px-5 py-3 font-medium">Sembol</th>
-                <th className="px-5 py-3 font-medium">Yön</th>
-                <th className="px-5 py-3 font-medium text-right">Boyut</th>
-                <th className="px-5 py-3 font-medium text-right">Giriş</th>
+                <th className="px-5 py-3 font-medium">Symbol</th>
+                <th className="px-5 py-3 font-medium">Side</th>
+                <th className="px-5 py-3 font-medium text-right">Size</th>
+                <th className="px-5 py-3 font-medium text-right">Entry</th>
                 <th className="px-5 py-3 font-medium text-right">Mark</th>
                 <th className="px-5 py-3 font-medium text-right">Liq.</th>
                 <th className="px-5 py-3 font-medium text-right">PnL</th>
                 <th className="px-5 py-3 font-medium text-right">Margin</th>
-                <th className="px-5 py-3 font-medium text-right">İşlem</th>
+                <th className="px-5 py-3 font-medium text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/50">
@@ -244,7 +244,7 @@ export const Positions: React.FC = () => {
               ) : positions.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="px-5 py-16 text-center text-text-muted text-sm">
-                    Açık pozisyon bulunamadı
+                    No open positions found
                   </td>
                 </tr>
               ) : (
@@ -304,7 +304,7 @@ export const Positions: React.FC = () => {
                           onClick={() => handleClose(pos)}
                           className="opacity-60 group-hover:opacity-100 transition-opacity"
                         >
-                          Kapat
+                          Close
                         </Button>
                       </td>
                     </tr>

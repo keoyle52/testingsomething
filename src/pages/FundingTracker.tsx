@@ -170,7 +170,7 @@ export const FundingTracker: React.FC = () => {
               <Clock size={16} className="text-primary" />
             </div>
             <div>
-              <div className="text-[10px] text-text-muted uppercase">Sonraki Funding</div>
+              <div className="text-[10px] text-text-muted uppercase">Next Funding</div>
               <div className="text-lg font-mono tabular-nums font-semibold text-primary">{countdown}</div>
             </div>
           </div>
@@ -182,7 +182,7 @@ export const FundingTracker: React.FC = () => {
                 <TrendingUp size={16} className="text-success" />
               </div>
               <div>
-                <div className="text-[10px] text-text-muted uppercase">En Yüksek APR</div>
+                <div className="text-[10px] text-text-muted uppercase">Highest APR</div>
                 <div className="text-sm font-semibold">
                   <span className="text-success">{highestApr.symbol}</span>
                   <span className="text-text-secondary ml-2">{(highestApr.apr * 100).toFixed(2)}%</span>
@@ -198,7 +198,7 @@ export const FundingTracker: React.FC = () => {
                 <TrendingDown size={16} className="text-info" />
               </div>
               <div>
-                <div className="text-[10px] text-text-muted uppercase">En Düşük APR</div>
+                <div className="text-[10px] text-text-muted uppercase">Lowest APR</div>
                 <div className="text-sm font-semibold">
                   <span className="text-info">{lowestApr.symbol}</span>
                   <span className="text-text-secondary ml-2">{(lowestApr.apr * 100).toFixed(2)}%</span>
@@ -219,11 +219,11 @@ export const FundingTracker: React.FC = () => {
           <table className="data-table text-sm text-left whitespace-nowrap">
             <thead className="text-[11px] text-text-muted uppercase tracking-wider border-b border-border">
               <tr>
-                <th className="px-5 py-3 font-medium">Sembol</th>
+                <th className="px-5 py-3 font-medium">Symbol</th>
                 <th className="px-5 py-3 font-medium text-right">Funding Rate (8h)</th>
-                <th className="px-5 py-3 font-medium text-right">Yıllık APR</th>
-                <th className="px-5 py-3 font-medium text-right">Açık Faiz (OI)</th>
-                <th className="px-5 py-3 font-medium text-right">24h Hacim</th>
+                <th className="px-5 py-3 font-medium text-right">Annual APR</th>
+                <th className="px-5 py-3 font-medium text-right">Open Interest (OI)</th>
+                <th className="px-5 py-3 font-medium text-right">24h Volume</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/50">
@@ -232,14 +232,14 @@ export const FundingTracker: React.FC = () => {
                   <td colSpan={5} className="px-5 py-16 text-center">
                     <div className="flex flex-col items-center gap-3 text-text-muted">
                       <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                      <span className="text-sm">Yükleniyor...</span>
+                      <span className="text-sm">Loading...</span>
                     </div>
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="px-5 py-16 text-center text-text-muted text-sm">
-                    Funding verisi bulunamadı
+                    No funding data found
                   </td>
                 </tr>
               ) : (
@@ -275,10 +275,10 @@ export const FundingTracker: React.FC = () => {
       {/* Personal Funding */}
       <div className="h-1/3 min-h-[250px] glass-card flex flex-col overflow-hidden p-0">
         <div className="px-5 py-3 border-b border-border flex items-center justify-between">
-          <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Kişisel Funding</span>
+          <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Personal Funding</span>
           {hasKeys && personalRows.length > 0 && (
             <div className="flex items-center gap-2">
-              <span className="text-[10px] text-text-muted">Tahmini Ödeme:</span>
+              <span className="text-[10px] text-text-muted">Estimated Payment:</span>
               <NumberDisplay
                 value={Math.abs(totalEstimated)}
                 prefix={totalEstimated >= 0 ? '+$' : '-$'}
@@ -295,7 +295,7 @@ export const FundingTracker: React.FC = () => {
               <div className="w-12 h-12 rounded-xl bg-surface-hover flex items-center justify-center mx-auto mb-3">
                 <Clock size={20} className="text-text-muted" />
               </div>
-              <p>API anahtarınızı yapılandırarak kişisel funding verilerinizi görün.</p>
+              <p>Configure your API key to view personal funding data.</p>
             </div>
           </div>
         ) : personalLoading ? (
@@ -304,18 +304,18 @@ export const FundingTracker: React.FC = () => {
           </div>
         ) : personalRows.length === 0 ? (
           <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
-            Açık pozisyon bulunamadı.
+            No open positions found.
           </div>
         ) : (
           <div className="overflow-auto flex-1">
             <table className="data-table text-sm text-left whitespace-nowrap">
               <thead className="text-[11px] text-text-muted uppercase tracking-wider border-b border-border">
                 <tr>
-                  <th className="px-5 py-3 font-medium">Sembol</th>
-                  <th className="px-5 py-3 font-medium">Yön</th>
-                  <th className="px-5 py-3 font-medium text-right">Boyut</th>
+                  <th className="px-5 py-3 font-medium">Symbol</th>
+                  <th className="px-5 py-3 font-medium">Side</th>
+                  <th className="px-5 py-3 font-medium text-right">Size</th>
                   <th className="px-5 py-3 font-medium text-right">Funding Rate</th>
-                  <th className="px-5 py-3 font-medium text-right">Tahmini Ödeme</th>
+                  <th className="px-5 py-3 font-medium text-right">Est. Payment</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/50">

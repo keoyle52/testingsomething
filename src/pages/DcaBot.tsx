@@ -24,12 +24,12 @@ export const DcaBot: React.FC = () => {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const runningRef = useRef(false);
 
-  const [symbol, setSymbol] = useState('BTC-USDC');
+  const [symbol, setSymbol] = useState('BTC-USD');
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY');
   const [amountPerOrder, setAmountPerOrder] = useState('0.01');
   const [intervalSec, setIntervalSec] = useState('3600');
   const [maxOrders, setMaxOrders] = useState('0');
-  const [isSpot, setIsSpot] = useState(true);
+  const [isSpot, setIsSpot] = useState(false);
   const [status, setStatus] = useState<'STOPPED' | 'RUNNING' | 'ERROR'>('STOPPED');
   const [showConfirm, setShowConfirm] = useState(false);
 
@@ -63,7 +63,7 @@ export const DcaBot: React.FC = () => {
       const fillPrice = side === 'BUY' ? askPrice : bidPrice;
 
       if (fillPrice <= 0) {
-        addLog({ time: new Date().toLocaleTimeString(), message: 'Fiyat verisi alinamadi. Siparis atlanıyor.' });
+        addLog({ time: new Date().toLocaleTimeString(), message: 'No price data available. Order skipped.' });
         return;
       }
 
@@ -80,12 +80,11 @@ export const DcaBot: React.FC = () => {
         const newCount = prev + 1;
         setAvgPrice((prevAvg) => prevAvg + (fillPrice - prevAvg) / newCount);
 
-        // Check max orders inside the same state update to avoid race condition
         const maxOrd = parseInt(maxOrders);
         if (maxOrd > 0 && newCount >= maxOrd) {
           runningRef.current = false;
           setStatus('STOPPED');
-          addLog({ time: new Date().toLocaleTimeString(), message: `Maksimum siparis sayisina (${maxOrd}) ulasildi. Bot durdu.` });
+          addLog({ time: new Date().toLocaleTimeString(), message: `Max order limit (${maxOrd}) reached. Bot stopped.` });
         }
 
         return newCount;
@@ -97,11 +96,11 @@ export const DcaBot: React.FC = () => {
         side,
         amount,
         price: fillPrice,
-        message: `DCA emri tamamlandi`,
+        message: `DCA order executed`,
       });
     } catch (err: unknown) {
       const msg = getErrorMessage(err);
-      addLog({ time: new Date().toLocaleTimeString(), message: `HATA: ${msg}` });
+      addLog({ time: new Date().toLocaleTimeString(), message: `ERROR: ${msg}` });
       toast.error(`DCA: ${msg}`);
     }
   }, [symbol, side, isSpot, amountPerOrder, maxOrders, addLog]);
@@ -129,7 +128,7 @@ export const DcaBot: React.FC = () => {
     setCurrentPrice(0);
     setLogs([]);
 
-    addLog({ time: new Date().toLocaleTimeString(), message: 'DCA Bot baslatildi' });
+    addLog({ time: new Date().toLocaleTimeString(), message: 'DCA Bot started' });
 
     (async () => {
       await executeDcaOrder();
@@ -152,7 +151,7 @@ export const DcaBot: React.FC = () => {
       timerRef.current = null;
     }
     setStatus('STOPPED');
-    addLog({ time: new Date().toLocaleTimeString(), message: 'Bot durduruldu' });
+    addLog({ time: new Date().toLocaleTimeString(), message: 'Bot stopped by user' });
   }, [addLog]);
 
   useEffect(() => {
@@ -174,8 +173,8 @@ export const DcaBot: React.FC = () => {
     <div className="flex h-[calc(100vh-52px)]">
       <ConfirmModal
         isOpen={showConfirm}
-        title="DCA Bot Baslat"
-        message={`${symbol} icin DCA ${side} emri baslatilacak.\nMiktar/Emir: ${amountPerOrder}\nAralik: ${intervalSec}s\nMax Emir: ${maxOrders === '0' ? 'Limitsiz' : maxOrders}\nPiyasa: ${isSpot ? 'Spot' : 'Perps'}`}
+        title="Start DCA Bot"
+        message={`DCA ${side} order will start for ${symbol}.\nAmount/Order: ${amountPerOrder}\nInterval: ${intervalSec}s\nMax Orders: ${maxOrders === '0' ? 'Unlimited' : maxOrders}\nMarket: ${isSpot ? 'Spot' : 'Perps'}`}
         onConfirm={doStart}
         onCancel={() => setShowConfirm(false)}
       />
@@ -183,32 +182,32 @@ export const DcaBot: React.FC = () => {
       {/* Settings Panel */}
       <div className="w-80 border-r border-border bg-surface/30 backdrop-blur-sm p-5 flex flex-col gap-5 overflow-y-auto">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-sm">DCA Ayarlari</h2>
+          <h2 className="font-semibold text-sm">DCA Settings</h2>
           <StatusBadge status={status} />
         </div>
 
         <Input
-          label="Sembol"
+          label="Symbol"
           type="text"
           value={symbol}
           onChange={(e) => setSymbol(e.target.value)}
-          placeholder="BTC-USDC"
+          placeholder="BTC-USD"
           disabled={isRunning}
         />
 
         <Select
-          label="Yon"
+          label="Direction"
           value={side}
           onChange={(e) => setSide(e.target.value as 'BUY' | 'SELL')}
           disabled={isRunning}
           options={[
-            { value: 'BUY', label: 'Alis (BUY)' },
-            { value: 'SELL', label: 'Satis (SELL)' },
+            { value: 'BUY', label: 'Buy' },
+            { value: 'SELL', label: 'Sell' },
           ]}
         />
 
         <Input
-          label="Miktar/Emir"
+          label="Amount/Order"
           type="number"
           value={amountPerOrder}
           onChange={(e) => setAmountPerOrder(e.target.value)}
@@ -217,26 +216,26 @@ export const DcaBot: React.FC = () => {
 
         <div className="grid grid-cols-2 gap-3">
           <Input
-            label="Aralik (sn)"
+            label="Interval (sec)"
             type="number"
             value={intervalSec}
             onChange={(e) => setIntervalSec(e.target.value)}
             disabled={isRunning}
-            hint="3600 = 1 saat"
+            hint="3600 = 1 hour"
           />
           <Input
-            label="Max Emir"
+            label="Max Orders"
             type="number"
             value={maxOrders}
             onChange={(e) => setMaxOrders(e.target.value)}
             disabled={isRunning}
-            hint="0 = limitsiz"
+            hint="0 = unlimited"
           />
         </div>
 
         {/* Market Toggle */}
         <div className="space-y-1.5">
-          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">Piyasa</label>
+          <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">Market</label>
           <div className="flex gap-2">
             <button
               onClick={() => !isRunning && setIsSpot(true)}
@@ -256,11 +255,11 @@ export const DcaBot: React.FC = () => {
         <div className="mt-auto pt-4 border-t border-border">
           {!isRunning ? (
             <Button variant="primary" fullWidth size="lg" icon={<Play size={16} />} onClick={startBot}>
-              Baslat
+              Start
             </Button>
           ) : (
             <Button variant="danger" fullWidth size="lg" icon={<Square size={16} />} onClick={stopBot}>
-              Durdur
+              Stop
             </Button>
           )}
         </div>
@@ -270,17 +269,17 @@ export const DcaBot: React.FC = () => {
       <div className="flex-1 p-6 flex flex-col gap-5 overflow-y-auto">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <StatCard
-            label="Tamamlanan Emir"
+            label="Orders Executed"
             value={<NumberDisplay value={executedOrders} decimals={0} />}
             icon={<Hash size={16} />}
           />
           <StatCard
-            label="Toplam Yatirim"
+            label="Total Invested"
             value={<NumberDisplay value={totalInvested} prefix="$" />}
             icon={<DollarSign size={16} />}
           />
           <StatCard
-            label="Ort. Fiyat"
+            label="Avg. Price"
             value={<NumberDisplay value={avgPrice} />}
             icon={<Repeat size={16} />}
           />
@@ -296,15 +295,15 @@ export const DcaBot: React.FC = () => {
         <div className="glass-card p-4">
           <div className="grid grid-cols-3 gap-4 text-center">
             <div>
-              <div className="text-[10px] text-text-muted uppercase mb-1">Guncel Fiyat</div>
+              <div className="text-[10px] text-text-muted uppercase mb-1">Current Price</div>
               <NumberDisplay value={currentPrice} className="text-lg font-semibold" />
             </div>
             <div>
-              <div className="text-[10px] text-text-muted uppercase mb-1">Ort. Alis</div>
+              <div className="text-[10px] text-text-muted uppercase mb-1">Avg. Entry</div>
               <NumberDisplay value={avgPrice} className="text-lg font-semibold" />
             </div>
             <div>
-              <div className="text-[10px] text-text-muted uppercase mb-1">Fark</div>
+              <div className="text-[10px] text-text-muted uppercase mb-1">Difference</div>
               <NumberDisplay
                 value={Math.abs(currentPrice - avgPrice)}
                 prefix={currentPrice >= avgPrice ? '+' : '-'}
@@ -318,8 +317,8 @@ export const DcaBot: React.FC = () => {
         {/* Log */}
         <div className="flex-1 glass-card flex flex-col overflow-hidden p-0">
           <div className="px-5 py-3 border-b border-border flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Log Kayitlari</span>
-            <span className="text-[10px] text-text-muted">{logs.length} kayit</span>
+            <span className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Activity Log</span>
+            <span className="text-[10px] text-text-muted">{logs.length} entries</span>
           </div>
           <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-1">
             {logs.map((log, i) => (
@@ -345,7 +344,7 @@ export const DcaBot: React.FC = () => {
               <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
                 <div className="text-center">
                   <Activity size={32} className="mx-auto mb-3 opacity-30" />
-                  <p>DCA log kayitlari burada gorunecektir.</p>
+                  <p>DCA activity logs will appear here.</p>
                 </div>
               </div>
             )}
