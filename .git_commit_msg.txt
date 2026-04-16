@@ -1,9 +1,9 @@
-fix: resolve 429 rate limit errors with TTL cache and StrictMode removal
+fix: strictly follow SosoValue API URLs and implement robust 429 circuit breaker
 
-- Remove React StrictMode to stop effects firing twice in development
-- Add TTL in-memory cache to sosoValueClient:
-    coins: 5 min, ETF data: 3-5 min, news: 2 min
-- Cache uses custom Axios adapter to bypass network on cache hits
-- Refresh buttons in EtfTracker and CryptoNews now call clearSosoCache()
-  to force fresh data when user explicitly requests it
-- Users navigating between pages no longer hit new API requests
+- Updated sosoValueClient to correctly route requests:
+  - ETF endpoints now use `https://api.sosovalue.xyz` (as per gitbook)
+  - News/Coins endpoints use `https://openapi.sosovalue.com`
+- Added 60-second circuit breaker lock for 429 errors. This prevents
+  application from continuously bombarding the rate-limited endpoints.
+- Updated EtfTracker.tsx to use Promise.allSettled() so one failed request
+  (like a rate-limited metric) doesn't crash the entire screen.

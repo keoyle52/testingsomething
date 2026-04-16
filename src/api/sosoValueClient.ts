@@ -1,54 +1,64 @@
 import axios from 'axios';
 import { useSettingsStore } from '../store/settingsStore';
 
-const BASE_URL = 'https://openapi.sosovalue.com';
+// SosoValue uses two distinct base URLs according to their docs
+const DOMAIN_OPENAPI = 'https://openapi.sosovalue.com';
+const DOMAIN_API_XYZ = 'https://api.sosovalue.xyz';
 
-// ─── In-Memory TTL Cache ───────────────────────────────────────────────────────
-// Prevents hitting rate limits when navigating between pages or
-// when React effects fire multiple times in development.
+// ─── In-Memory TTL Cache & Circuit Breaker ─────────────────────────────────────
 interface CacheEntry { data: unknown; expiresAt: number; }
 const cache = new Map<string, CacheEntry>();
 
+let rateLimitResetTime = 0; // Timestamp when the 429 lock expires
+
 const TTL: Record<string, number> = {
-  '/openapi/v1/data/default/coin/list':      5 * 60_000, // 5 min  — coins don't change often
-  '/openapi/v2/etf/historicalInflowChart':   5 * 60_000, // 5 min
-  '/openapi/v2/etf/currentEtfDataMetrics':   3 * 60_000, // 3 min
-  '/api/v1/news/featured':                   2 * 60_000, // 2 min  — news changes faster
-  '/api/v1/news/featured/currency':          2 * 60_000, // 2 min
+  '/openapi/v1/data/default/coin/list':      5 * 60_000, 
+  '/openapi/v2/etf/historicalInflowChart':   5 * 60_000, 
+  '/openapi/v2/etf/currentEtfDataMetrics':   3 * 60_000, 
+  '/api/v1/news/featured':                   2 * 60_000, 
+  '/api/v1/news/featured/currency':          2 * 60_000, 
 };
 
 function getCacheTtl(url: string): number {
   for (const [key, ttl] of Object.entries(TTL)) {
     if (url.includes(key)) return ttl;
   }
-  return 0; // no caching by default
+  return 0;
 }
 
 function cacheKey(url: string, body?: unknown): string {
-  return `${url}::${body ? JSON.stringify(body) : ''}`;
+  return `${url}::${body ? typeof body === 'string' ? body : JSON.stringify(body) : ''}`;
 }
 
 // ─── Axios Client ─────────────────────────────────────────────────────────────
 
 function makeClient() {
-  const client = axios.create({ baseURL: BASE_URL });
+  const client = axios.create();
 
-  // Request interceptor: inject API key + serve from cache if fresh
+  // Request interceptor
   client.interceptors.request.use(async (config) => {
+    // 1. Route to correct Domain based on endpoint
+    const url = config.url ?? '';
+    const isEtf = url.includes('/openapi/v2/etf');
+    config.baseURL = isEtf ? DOMAIN_API_XYZ : DOMAIN_OPENAPI;
+
+    // 2. Inject API key
     const { sosoApiKey } = useSettingsStore.getState();
     if (sosoApiKey) {
       config.headers['x-soso-api-key'] = sosoApiKey;
     }
 
-    // Check cache
-    const url = config.url ?? '';
+    // 3. Circuit Breaker for 429 Too Many Requests
+    if (Date.now() < rateLimitResetTime) {
+      return Promise.reject(new Error('[429] Rate limit exceeded. Pausing requests to cool down.'));
+    }
+
+    // 4. Cache Check
     const ttl = getCacheTtl(url);
     if (ttl > 0) {
       const key = cacheKey(url, config.data);
       const entry = cache.get(key);
       if (entry && Date.now() < entry.expiresAt) {
-        // Abort the real request and return cached data via a custom flag
-        // We use a custom adapter to bypass the actual network call
         config.adapter = () =>
           Promise.resolve({
             data: entry.data,
@@ -85,12 +95,19 @@ function makeClient() {
       return body; // unwrap: services receive full body { code, data, ... }
     },
     (error) => {
+      const status = error?.response?.status;
+      
+      // If we hit 429, engage the circuit breaker for 60 seconds
+      // so we stop spamming the API and let the limit reset.
+      if (status === 429) {
+        rateLimitResetTime = Date.now() + 60_000;
+      }
+
       const apiMsg =
         error?.response?.data?.msg ??
         error?.response?.data?.message ??
         error?.message ??
         'Network error';
-      const status = error?.response?.status;
       return Promise.reject(new Error(`[${status ?? 'ERR'}] ${apiMsg}`));
     },
   );
@@ -103,4 +120,5 @@ export const sosoValueClient = makeClient();
 /** Manually clear all cached SosoValue responses (e.g. on Refresh button press). */
 export function clearSosoCache() {
   cache.clear();
+  rateLimitResetTime = 0; // also reset the 429 lock
 }

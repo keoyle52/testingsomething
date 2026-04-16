@@ -47,12 +47,18 @@ export const EtfTracker: React.FC = () => {
     if (forceRefresh) clearSosoCache();
     setLoading(true);
     try {
-      const [m, h] = await Promise.all([
+      const results = await Promise.allSettled([
         fetchEtfCurrentMetrics(etfType),
         fetchEtfHistoricalInflow(etfType),
       ]);
-      setMetrics(m);
-      setHistory(h);
+      
+      if (results[0].status === 'fulfilled') setMetrics(results[0].value);
+      if (results[1].status === 'fulfilled') setHistory(results[1].value);
+
+      // If both failed, throw error to show a unified toast
+      if (results[0].status === 'rejected' && results[1].status === 'rejected') {
+        throw results[0].reason;
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to fetch ETF data';
       toast.error(msg);
