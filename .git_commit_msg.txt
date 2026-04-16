@@ -1,9 +1,7 @@
-fix: strictly follow SosoValue API URLs and implement robust 429 circuit breaker
+feat: implement stale-while-revalidate offline caching for SosoValue
 
-- Updated sosoValueClient to correctly route requests:
-  - ETF endpoints now use `https://api.sosovalue.xyz` (as per gitbook)
-  - News/Coins endpoints use `https://openapi.sosovalue.com`
-- Added 60-second circuit breaker lock for 429 errors. This prevents
-  application from continuously bombarding the rate-limited endpoints.
-- Updated EtfTracker.tsx to use Promise.allSettled() so one failed request
-  (like a rate-limited metric) doesn't crash the entire screen.
+- Added Local Storage backed caching mechanism (`getStaleFallback`)
+- If the system hits a 429 Rate Limit error, it will now silence the error
+  and automatically serve the last successfully saved data to the UI.
+- Prevents UI white-screens and annoying toast popups when limits are hit
+- Increased NewsBot polling interval from 60 to 180 seconds to save quota

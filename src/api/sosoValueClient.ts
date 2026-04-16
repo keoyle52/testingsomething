@@ -7,7 +7,7 @@ const DOMAIN_API_XYZ = 'https://api.sosovalue.xyz';
 
 // ─── In-Memory TTL Cache & Circuit Breaker ─────────────────────────────────────
 interface CacheEntry { data: unknown; expiresAt: number; }
-const cache = new Map<string, CacheEntry>();
+const memoryCache = new Map<string, CacheEntry>();
 
 let rateLimitResetTime = 0; // Timestamp when the 429 lock expires
 
@@ -30,6 +30,24 @@ function cacheKey(url: string, body?: unknown): string {
   return `${url}::${body ? typeof body === 'string' ? body : JSON.stringify(body) : ''}`;
 }
 
+// Helper to gracefully fallback to localStorage stale data
+function getStaleFallback(key: string): any {
+  try {
+    const raw = localStorage.getItem(`soso_fallback_${key}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function setStaleFallback(key: string, data: any) {
+  try {
+    localStorage.setItem(`soso_fallback_${key}`, JSON.stringify(data));
+  } catch {
+    // Ignore quota errors
+  }
+}
+
 // ─── Axios Client ─────────────────────────────────────────────────────────────
 
 function makeClient() {
@@ -37,36 +55,36 @@ function makeClient() {
 
   // Request interceptor
   client.interceptors.request.use(async (config) => {
-    // 1. Route to correct Domain based on endpoint
     const url = config.url ?? '';
     const isEtf = url.includes('/openapi/v2/etf');
     config.baseURL = isEtf ? DOMAIN_API_XYZ : DOMAIN_OPENAPI;
 
-    // 2. Inject API key
     const { sosoApiKey } = useSettingsStore.getState();
-    if (sosoApiKey) {
-      config.headers['x-soso-api-key'] = sosoApiKey;
-    }
+    if (sosoApiKey) config.headers['x-soso-api-key'] = sosoApiKey;
 
-    // 3. Circuit Breaker for 429 Too Many Requests
-    if (Date.now() < rateLimitResetTime) {
-      return Promise.reject(new Error('[429] Rate limit exceeded. Pausing requests to cool down.'));
-    }
-
-    // 4. Cache Check
     const ttl = getCacheTtl(url);
+    const key = cacheKey(url, config.data);
+    
+    // Attach exactly computed key to ensure response matches it
+    (config as any).__cacheKey = key;
+    (config as any).__ttl = ttl;
+
+    // ── Circuit Breaker: Try Stale Fallback ──
+    if (Date.now() < rateLimitResetTime) {
+      const fallback = getStaleFallback(key);
+      if (fallback) {
+        // Silently serve stale data instead of crashing the UI
+        config.adapter = () => Promise.resolve({ data: fallback, status: 200, statusText: 'OK', headers: {}, config });
+        return config;
+      }
+      return Promise.reject(new Error('[429] Rate limit exceeded. Pausing requests...'));
+    }
+
+    // ── Fresh Memory Cache ──
     if (ttl > 0) {
-      const key = cacheKey(url, config.data);
-      const entry = cache.get(key);
+      const entry = memoryCache.get(key);
       if (entry && Date.now() < entry.expiresAt) {
-        config.adapter = () =>
-          Promise.resolve({
-            data: entry.data,
-            status: 200,
-            statusText: 'OK (cached)',
-            headers: {},
-            config,
-          });
+        config.adapter = () => Promise.resolve({ data: entry.data, status: 200, statusText: 'OK (cached)', headers: {}, config });
       }
     }
 
@@ -78,12 +96,12 @@ function makeClient() {
     (response) => {
       const body = response.data;
 
-      // Store in cache if the request succeeded
-      const url = response.config?.url ?? '';
-      const ttl = getCacheTtl(url);
-      if (ttl > 0) {
-        const key = cacheKey(url, response.config?.data ? JSON.parse(response.config.data) : undefined);
-        cache.set(key, { data: body, expiresAt: Date.now() + ttl });
+      // Store in memory cache + offline fallback if request succeeded
+      const key = (response.config as any).__cacheKey;
+      const ttl = (response.config as any).__ttl;
+      if (key && ttl > 0) {
+        memoryCache.set(key, { data: body, expiresAt: Date.now() + ttl });
+        setStaleFallback(key, body); // Always keep a stale copy just in case!
       }
 
       // SosoValue: code=0 → success, anything else → error
@@ -98,9 +116,19 @@ function makeClient() {
       const status = error?.response?.status;
       
       // If we hit 429, engage the circuit breaker for 60 seconds
-      // so we stop spamming the API and let the limit reset.
       if (status === 429) {
         rateLimitResetTime = Date.now() + 60_000;
+        
+        // Let's try to RESCUE this failed request using our offline fallback!
+        const key = (error.config as any)?.__cacheKey;
+        if (key) {
+          const fallback = getStaleFallback(key);
+          if (fallback) {
+            console.warn(`[429 Rescued] Served stale data for ${error.config.url}`);
+            // Return unresolved promise with fallback data to masquerade as a success
+            return Promise.resolve(fallback);
+          }
+        }
       }
 
       const apiMsg =
@@ -119,6 +147,6 @@ export const sosoValueClient = makeClient();
 
 /** Manually clear all cached SosoValue responses (e.g. on Refresh button press). */
 export function clearSosoCache() {
-  cache.clear();
+  memoryCache.clear();
   rateLimitResetTime = 0; // also reset the 429 lock
 }

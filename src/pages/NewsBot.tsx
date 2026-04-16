@@ -36,7 +36,7 @@ const DEFAULT_RULES: TriggerRule[] = [
   { keyword: 'hack', side: 'SELL', category: 0 },
 ];
 
-const POLL_MS = 60_000; // 60 seconds
+const POLL_MS = 180_000; // 3 minutes (reduced polling to save API limits)
 
 export const NewsBot: React.FC = () => {
   const { sosoApiKey, privateKey, apiKeyName, geminiApiKey } = useSettingsStore();
