@@ -1,4 +1,5 @@
-chore: add vercel.json to fix SPA routing 404s
+feat: switch Copy Trader from open orders to executed trades
 
-- Added vercel.json with a rewrite rule to map all paths to index.html
-- This resolves the issue where refreshing on a React Router route (e.g. /settings) returns a 404 error on Vercel
+- Copy Trader now polls `/accounts/:addr/trades` instead of `/orders`
+- This ensures Market Orders and instantly filled Limit Orders are instantly caught and copied
+- All copied orders now execute as forced Market Orders (type=2) to guarantee immediate fill

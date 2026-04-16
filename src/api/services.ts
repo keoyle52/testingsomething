@@ -915,13 +915,24 @@ export async function fetchAccountFills(
 ): Promise<unknown[]> {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
+  return fetchTargetAccountFills(market, address, limit);
+}
+
+/**
+ * Fetch recent fills / trades for ANY target account (used by Copy Trader).
+ */
+export async function fetchTargetAccountFills(
+  market: 'spot' | 'perps',
+  targetAddress: string,
+  limit = 50,
+): Promise<unknown[]> {
   const client = getClient(market);
   try {
-    const res = await client.get(`/accounts/${address}/trades`, {
+    const res = await client.get(`/accounts/${targetAddress}/trades`, {
       params: { limit },
     });
     const list = res?.data ?? res ?? [];
-    return Array.isArray(list) ? list : [];
+    return Array.isArray(list) ? list : (list.trades ?? []);
   } catch {
     return [];
   }

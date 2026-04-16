@@ -10,7 +10,7 @@ import { Input, Select } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { useSettingsStore } from '../store/settingsStore';
 import {
-  fetchAccountOrders,
+  fetchTargetAccountFills,
   fetchPositions,
   placeOrder,
   type PlaceOrderParams,
@@ -90,20 +90,9 @@ export const CopyTrader: React.FC = () => {
       const params: PlaceOrderParams = {
         symbol: order.symbol,
         side: order.side as 1 | 2,
-        type: order.type as 1 | 2,
+        type: 2, // Always place copied orders as Market Orders for guaranteed fill
         quantity: qty.toString(),
       };
-      if (order.type === 1 && order.price) {
-        params.price = order.price;
-      }
-      if (order.timeInForce) {
-        if (order.timeInForce === 2) {
-          // FOK not supported by SoDEX API — fall back to IOC
-          params.timeInForce = 3;
-        } else {
-          params.timeInForce = order.timeInForce as 1 | 3 | 4;
-        }
-      }
 
       const sideLabel = order.side === 1 ? 'BUY' : 'SELL';
       setTotalAttempts((p) => p + 1);
@@ -140,7 +129,7 @@ export const CopyTrader: React.FC = () => {
   const pollOrders = useCallback(
     async (market: 'spot' | 'perps') => {
       try {
-        const orders: TargetOrder[] = await fetchAccountOrders(market, targetAddress);
+        const orders: TargetOrder[] = await fetchTargetAccountFills(market, targetAddress) as TargetOrder[];
         const ordersArray = Array.isArray(orders) ? orders : [];
 
         setTargetOrders((prev) => {
@@ -221,7 +210,7 @@ export const CopyTrader: React.FC = () => {
     const seedKnownOrders = async () => {
       for (const m of markets) {
         try {
-          const orders: TargetOrder[] = await fetchAccountOrders(m, targetAddress);
+          const orders: TargetOrder[] = await fetchTargetAccountFills(m, targetAddress) as TargetOrder[];
           const ordersArray = Array.isArray(orders) ? orders : [];
           for (const order of ordersArray) {
             const oid = getOrderId(order);
