@@ -1,7 +1,4 @@
-feat: implement stale-while-revalidate offline caching for SosoValue
+chore: add vercel.json to fix SPA routing 404s
 
-- Added Local Storage backed caching mechanism (`getStaleFallback`)
-- If the system hits a 429 Rate Limit error, it will now silence the error
-  and automatically serve the last successfully saved data to the UI.
-- Prevents UI white-screens and annoying toast popups when limits are hit
-- Increased NewsBot polling interval from 60 to 180 seconds to save quota
+- Added vercel.json with a rewrite rule to map all paths to index.html
+- This resolves the issue where refreshing on a React Router route (e.g. /settings) returns a 404 error on Vercel
