@@ -163,6 +163,58 @@ function roundToTick(value: number, tickSize: number, precision: number): string
 }
 
 /**
+ * Normalize quantity against symbol lot-size rules:
+ * - Align to stepSize
+ * - Enforce min/max quantity bounds
+ * - Use marketMinQuantity/marketMaxQuantity for market orders when present
+ */
+function normalizeOrderQuantity(
+  rawQuantity: number,
+  orderType: 1 | 2,
+  symbolEntry: Record<string, unknown> | null,
+  quantityPrecision: number,
+  stepSize: number,
+): string {
+  if (!Number.isFinite(rawQuantity) || rawQuantity <= 0) {
+    throw new Error(`Invalid quantity: "${rawQuantity}"`);
+  }
+
+  const safePrecision = Math.max(0, Math.min(quantityPrecision, 10));
+  const factor = Math.pow(10, safePrecision);
+  const step = stepSize > 0 ? stepSize : DEFAULT_STEP_SIZE;
+  const stepUnits = Math.max(1, Math.round(step * factor));
+
+  const minQtyRaw = parseFloat(String(
+    orderType === 2
+      ? (symbolEntry?.marketMinQuantity ?? symbolEntry?.minQuantity ?? 0)
+      : (symbolEntry?.minQuantity ?? 0),
+  ));
+  const maxQtyRaw = parseFloat(String(
+    orderType === 2
+      ? (symbolEntry?.marketMaxQuantity ?? symbolEntry?.maxQuantity ?? 0)
+      : (symbolEntry?.maxQuantity ?? 0),
+  ));
+
+  const minQtyUnits = Number.isFinite(minQtyRaw) && minQtyRaw > 0
+    ? Math.ceil((minQtyRaw * factor) / stepUnits) * stepUnits
+    : 0;
+  const maxQtyUnits = Number.isFinite(maxQtyRaw) && maxQtyRaw > 0
+    ? Math.floor((maxQtyRaw * factor) / stepUnits) * stepUnits
+    : 0;
+
+  let qtyUnits = Math.floor((rawQuantity * factor) / stepUnits) * stepUnits;
+  if (qtyUnits <= 0) qtyUnits = stepUnits;
+  if (minQtyUnits > 0 && qtyUnits < minQtyUnits) qtyUnits = minQtyUnits;
+  if (maxQtyUnits > 0 && qtyUnits > maxQtyUnits) {
+    throw new Error(
+      `Quantity exceeds max allowed (${(maxQtyUnits / factor).toFixed(safePrecision)}) for this symbol/order type`,
+    );
+  }
+
+  return (qtyUnits / factor).toFixed(safePrecision);
+}
+
+/**
  * Look up the full symbol entry (including precision metadata) for a given
  * symbol on the specified market.  Returns null when not found.
  * Results are cached for SYMBOL_CACHE_TTL ms to avoid redundant API calls.
@@ -439,7 +491,7 @@ async function placeSpotOrder(params: PlaceOrderParams): Promise<unknown> {
   // Round price and quantity to exchange-required precision/tick multiples
   const rawQty = parseFloat(params.quantity);
   if (isNaN(rawQty) || rawQty <= 0) throw new Error(`placeSpotOrder: invalid quantity "${params.quantity}"`);
-  const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
+  const quantity = normalizeOrderQuantity(rawQty, params.type, symbolEntry, quantityPrecision, stepSize);
   const price = params.price !== undefined
     ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
     : undefined;
@@ -498,7 +550,7 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<unknown> {
   // Round price and quantity to exchange-required precision/tick multiples
   const rawQty = parseFloat(params.quantity);
   if (isNaN(rawQty) || rawQty <= 0) throw new Error(`placePerpsOrder: invalid quantity "${params.quantity}"`);
-  const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
+  const quantity = normalizeOrderQuantity(rawQty, params.type, symbolEntry, quantityPrecision, stepSize);
   const price = params.price !== undefined
     ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
     : undefined;
@@ -572,7 +624,7 @@ export async function placeBatchOrders(
     const orders = ordersList.map((params) => {
       const timeInForce = params.timeInForce ?? (params.type === 2 ? 3 : 1);
       const rawQty = parseFloat(params.quantity);
-      const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
+      const quantity = normalizeOrderQuantity(rawQty, params.type, symbolEntry, quantityPrecision, stepSize);
       const price = params.price !== undefined
         ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
         : undefined;
@@ -616,7 +668,7 @@ export async function placeBatchOrders(
     const orders = ordersList.map((params) => {
       const timeInForce = params.timeInForce ?? (params.type === 2 ? 3 : 1);
       const rawQty = parseFloat(params.quantity);
-      const quantity = roundToTick(rawQty, stepSize, quantityPrecision);
+      const quantity = normalizeOrderQuantity(rawQty, params.type, symbolEntry, quantityPrecision, stepSize);
       const price = params.price !== undefined
         ? roundToTick(parseFloat(params.price), tickSize, pricePrecision)
         : undefined;
