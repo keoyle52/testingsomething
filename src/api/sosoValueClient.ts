@@ -91,6 +91,20 @@ function setStaleFallback(key: string, data: unknown) {
 
 // ─── Axios Client ─────────────────────────────────────────────────────────────
 
+// ─── Token Bucket / Rate Limiter ───
+// SosoValue limits us to 20 requests/minute. We ensure 1 request max every 3.5 seconds.
+let lastRequestTime = 0;
+const RATE_LIMIT_DELAY = 3500; 
+
+async function rateLimitPacer() {
+  const now = Date.now();
+  const timeSinceLast = now - lastRequestTime;
+  if (timeSinceLast < RATE_LIMIT_DELAY) {
+    await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_DELAY - timeSinceLast));
+  }
+  lastRequestTime = Date.now();
+}
+
 function makeClient() {
   const client = axios.create();
 
@@ -112,6 +126,15 @@ function makeClient() {
     meta.__ttl = ttl;
     meta.__endpointKey = endpointKey(url);
 
+    // ── Fresh Memory Cache ──
+    if (ttl > 0) {
+      const entry = memoryCache.get(key);
+      if (entry && Date.now() < entry.expiresAt) {
+        config.adapter = () => Promise.resolve({ data: entry.data, status: 200, statusText: 'OK (cached)', headers: {}, config });
+        return config;
+      }
+    }
+
     // ── Circuit Breaker: Try Stale Fallback ──
     const endpoint = meta.__endpointKey ?? endpointKey(url);
     const resetAt = endpointRateLimitReset.get(endpoint) ?? 0;
@@ -126,13 +149,8 @@ function makeClient() {
       return Promise.reject(new Error(`[429] Rate limit exceeded. Retry in ${waitSec}s`));
     }
 
-    // ── Fresh Memory Cache ──
-    if (ttl > 0) {
-      const entry = memoryCache.get(key);
-      if (entry && Date.now() < entry.expiresAt) {
-        config.adapter = () => Promise.resolve({ data: entry.data, status: 200, statusText: 'OK (cached)', headers: {}, config });
-      }
-    }
+    // Enforce Pacing
+    await rateLimitPacer();
 
     return config;
   });
