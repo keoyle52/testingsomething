@@ -83,12 +83,13 @@ export const Settings: React.FC = () => {
 
                 <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
                   <Input
-                    label="API Key Name"
+                    label="API Key (EVM Address)"
                     type="text"
                     value={store.apiKeyName}
                     onChange={(e) => store.setApiKeyName(e.target.value)}
-                    placeholder="e.g. test-key-1"
+                    placeholder="0x... (optional, defaults to derived address)"
                     icon={<Key size={14} />}
+                    hint="SoDEX expects X-API-Key as an EVM address. If empty or invalid, derived address from private key is used."
                   />
 
                   <Input
