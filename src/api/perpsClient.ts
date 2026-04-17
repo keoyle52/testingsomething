@@ -9,15 +9,13 @@ const BASE_URL_TESTNET = 'https://testnet-gw.sodex.dev/api/v1/perps';
 export const perpsClient = axios.create({ timeout: 15_000 });
 
 function resolveApiKeyAddress(apiKeyName: string, privateKey: string): string {
-  const raw = (apiKeyName ?? '').trim();
-  if (raw && /^0x[a-fA-F0-9]{40}$/.test(raw)) return raw;
   try {
-    if (!privateKey) return raw;
-    const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
-    return new ethers.Wallet(pk).address;
-  } catch {
-    return raw;
-  }
+    if (privateKey) {
+      const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
+      return new ethers.Wallet(pk).address;
+    }
+  } catch {}
+  return (apiKeyName ?? '').trim();
 }
 
 perpsClient.interceptors.request.use(async (config) => {
@@ -38,6 +36,13 @@ perpsClient.interceptors.request.use(async (config) => {
       config.headers['X-API-Key'] = apiKeyAddress;
       config.headers['X-API-Nonce'] = nonce;
       config.headers['X-API-Sign'] = signature;
+      
+      console.log('--- NETWORK INTERCEPTOR ---');
+      console.log('URL:', config.url);
+      console.log('X-API-Key:', apiKeyAddress);
+      console.log('Payload being sent:', JSON.stringify(payload));
+      console.log('---------------------------');
+      
     } catch (error) {
       console.error('Signing failed:', error);
       return Promise.reject(error);
