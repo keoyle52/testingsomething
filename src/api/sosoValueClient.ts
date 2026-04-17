@@ -35,7 +35,8 @@ const TTL: Record<string, number> = {
   '/openapi/v2/etf/historicalInflowChart':   5 * 60_000, 
   '/openapi/v2/etf/currentEtfDataMetrics':   3 * 60_000, 
   '/api/v1/news/featured':                   2 * 60_000, 
-  '/api/v1/news/featured/currency':          2 * 60_000, 
+  '/api/v1/news/featured/currency':          2 * 60_000,
+  '/api/v1/news':                            3 * 60_000, 
 };
 
 function getCacheTtl(url: string): number {

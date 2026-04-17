@@ -93,11 +93,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
 }
 
 function getEvmAddress(): string {
-  const { apiKeyName, privateKey } = useSettingsStore.getState();
-  const rawApiName = (apiKeyName ?? '').trim();
-  if (rawApiName && /^0x[a-fA-F0-9]{40}$/i.test(rawApiName)) {
-    return rawApiName;
-  }
+  const { privateKey } = useSettingsStore.getState();
   if (!privateKey) return '';
   try {
     let pk = privateKey;
