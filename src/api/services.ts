@@ -95,6 +95,24 @@ function getClient(market: 'spot' | 'perps') {
   return market === 'spot' ? spotClient : perpsClient;
 }
 
+function unwrapEnvelopeData(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object') {
+    const v = value as Record<string, unknown>;
+    const nested = v.data;
+    if (nested && typeof nested === 'object') return nested as Record<string, unknown>;
+    return v;
+  }
+  return {};
+}
+
+function extractAccountIDFromPayload(value: unknown): number | string | null {
+  const root = unwrapEnvelopeData(value);
+  const id = root.aid ?? root.accountID ?? root.accountId ?? root.account_id ?? root.id;
+  if (id == null) return null;
+  if (typeof id === 'string' && id.trim() === '') return null;
+  return id as number | string;
+}
+
 /**
  * Parse an order ID string to a numeric value for API parameters that require
  * a uint64. Returns the number if the string is a valid integer, or NaN if not.
@@ -331,13 +349,23 @@ export async function fetchPerpsAccountState(): Promise<{ accountID: number | st
   const cacheKey = `perps:${address}`;
   const cached = _accountStateCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < ACCOUNT_STATE_CACHE_TTL) return cached.state;
-  const res = await withRetry(() => perpsClient.get(`/accounts/${address}/state`));
-  const data = res?.data ?? res ?? {};
-  assertNoBodyError(data);
-  // WsPerpsState uses `aid` for account ID; also try legacy field names
-  const accountID = data.aid ?? data.accountID ?? data.accountId ?? data.account_id ?? data.id;
+  const stateRes = await withRetry(() => perpsClient.get(`/accounts/${address}/state`));
+  const stateData = stateRes?.data ?? stateRes ?? {};
+  assertNoBodyError(stateData);
+  let accountID = extractAccountIDFromPayload(stateData);
+  let parsed = unwrapEnvelopeData(stateData);
+
+  // Fallback: some gateways may omit aid on /state but include it on /accounts/{addr}
+  if (accountID == null) {
+    const infoRes = await withRetry(() => perpsClient.get(`/accounts/${address}`));
+    const infoData = infoRes?.data ?? infoRes ?? {};
+    assertNoBodyError(infoData);
+    accountID = extractAccountIDFromPayload(infoData);
+    parsed = { ...parsed, ...unwrapEnvelopeData(infoData) };
+  }
+
   if (accountID == null) throw new Error('fetchPerpsAccountState: accountID not found in response');
-  const state = { ...data, accountID };
+  const state = { ...parsed, accountID };
   _accountStateCache.set(cacheKey, { state, ts: Date.now() });
   return state;
 }
@@ -354,13 +382,23 @@ export async function fetchSpotAccountState(): Promise<{ accountID: number | str
   const cacheKey = `spot:${address}`;
   const cached = _accountStateCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < ACCOUNT_STATE_CACHE_TTL) return cached.state;
-  const res = await withRetry(() => spotClient.get(`/accounts/${address}/state`));
-  const data = res?.data ?? res ?? {};
-  assertNoBodyError(data);
-  // WsSpotState uses `aid` for account ID; also try legacy field names
-  const accountID = data.aid ?? data.accountID ?? data.accountId ?? data.account_id ?? data.id;
+  const stateRes = await withRetry(() => spotClient.get(`/accounts/${address}/state`));
+  const stateData = stateRes?.data ?? stateRes ?? {};
+  assertNoBodyError(stateData);
+  let accountID = extractAccountIDFromPayload(stateData);
+  let parsed = unwrapEnvelopeData(stateData);
+
+  // Fallback: some gateways may omit aid on /state but include it on /accounts/{addr}
+  if (accountID == null) {
+    const infoRes = await withRetry(() => spotClient.get(`/accounts/${address}`));
+    const infoData = infoRes?.data ?? infoRes ?? {};
+    assertNoBodyError(infoData);
+    accountID = extractAccountIDFromPayload(infoData);
+    parsed = { ...parsed, ...unwrapEnvelopeData(infoData) };
+  }
+
   if (accountID == null) throw new Error('fetchSpotAccountState: accountID not found in response');
-  const state = { ...data, accountID };
+  const state = { ...parsed, accountID };
   _accountStateCache.set(cacheKey, { state, ts: Date.now() });
   return state;
 }
