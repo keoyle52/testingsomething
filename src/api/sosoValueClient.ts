@@ -145,7 +145,7 @@ function makeClient() {
       const config = response.config as typeof response.config & SosoRequestMeta;
       const key = config.__cacheKey;
       const ttl = config.__ttl;
-      if (key && ttl > 0) {
+      if (key && ttl && ttl > 0) {
         memoryCache.set(key, { data: body, expiresAt: Date.now() + ttl });
         setStaleFallback(key, body); // Always keep a stale copy just in case!
       }
@@ -173,7 +173,7 @@ function makeClient() {
         if (key) {
           const fallback = getStaleFallback(key);
           if (fallback) {
-            console.warn(`[429 Rescued] Served stale data for ${error.config.url}`);
+            console.warn(`[429 Rescued] Served stale data for ${error.config?.url}`);
             // Return unresolved promise with fallback data to masquerade as a success
             return Promise.resolve(fallback);
           }
