@@ -248,6 +248,19 @@ async function fetchReferencePrice(
   throw new Error(`No valid reference price found for ${normalizedSym}`);
 }
 
+function extractApiErrorMessage(err: unknown): string {
+  const e = err as {
+    message?: unknown;
+    response?: { data?: { error?: unknown; message?: unknown; code?: unknown } };
+  };
+  return String(
+    e?.response?.data?.error
+      ?? e?.response?.data?.message
+      ?? e?.message
+      ?? '',
+  ).toLowerCase();
+}
+
 /**
  * Look up the full symbol entry (including precision metadata) for a given
  * symbol on the specified market.  Returns null when not found.
@@ -624,12 +637,48 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<unknown> {
     orders: [order],
   };
 
-  const res = await withRetry(() => perpsClient.post('/trade/orders', payload));
-  const data = res?.data ?? res ?? {};
-  assertNoBodyError(data);
+  let data: unknown;
+  try {
+    const res = await withRetry(() => perpsClient.post('/trade/orders', payload));
+    data = res?.data ?? res ?? {};
+    assertNoBodyError(data);
+  } catch (err) {
+    // Some environments reject market BUY quantity while accepting funds.
+    // Retry once with `funds` if we hit the known server-side quantity validation error.
+    const isMarketBuy = params.type === 2 && params.side === 1;
+    const isQuantityInvalid = extractApiErrorMessage(err).includes('quantity is invalid');
+    if (!isMarketBuy || !isQuantityInvalid) throw err;
+
+    const refPrice = await fetchReferencePrice(params.symbol, 'perps', params.side);
+    const notional = parseFloat(quantity) * refPrice;
+    const funds = notional.toFixed(Math.max(2, Math.min(pricePrecision, 8)));
+    const fallbackOrder: Record<string, unknown> = {
+      clOrdID: generateClOrdID(),
+      modifier: 1,
+      side: params.side,
+      type: params.type,
+      timeInForce,
+      funds,
+      reduceOnly: false,
+      positionSide: 1,
+    };
+    const fallbackPayload = {
+      accountID: accountState.accountID,
+      symbolID,
+      orders: [fallbackOrder],
+    };
+    const fallbackRes = await withRetry(() => perpsClient.post('/trade/orders', fallbackPayload));
+    data = fallbackRes?.data ?? fallbackRes ?? {};
+    assertNoBodyError(data);
+  }
 
   // Unwrap the first order result from the response array
-  const firstOrder = Array.isArray(data) ? data[0] : (Array.isArray(data?.orders) ? data.orders[0] : data);
+  const resultData = data as Record<string, unknown> | unknown[];
+  const firstOrder = Array.isArray(resultData)
+    ? resultData[0]
+    : (Array.isArray((resultData as Record<string, unknown>)?.orders)
+      ? ((resultData as Record<string, unknown>).orders as unknown[])[0]
+      : resultData);
   return firstOrder ?? data;
 }
 
