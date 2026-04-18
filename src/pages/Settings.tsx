@@ -4,7 +4,7 @@ import { spotClient } from '../api/spotClient';
 import { wsService } from '../api/websocket';
 import toast from 'react-hot-toast';
 import { ethers } from 'ethers';
-import { Key, Shield, Settings2, Info, Wifi, Unplug, Globe, Bell, Hash, Zap } from 'lucide-react';
+import { Key, Shield, Settings2, Info, Wifi, Unplug, Globe, Bell, Hash, Zap, FlaskConical, Sun } from 'lucide-react';
 import { Card } from '../components/common/Card';
 import { Input } from '../components/common/Input';
 import { Toggle } from '../components/common/Input';
@@ -253,6 +253,44 @@ export const Settings: React.FC = () => {
                     checked={store.toastsEnabled}
                     onChange={store.setToastsEnabled}
                   />
+                </div>
+              </Card>
+
+              <Card>
+                <div className="flex items-center gap-2 mb-5">
+                  <Sun size={16} className="text-primary" />
+                  <h3 className="text-sm font-semibold">Appearance</h3>
+                </div>
+                <div className="space-y-3">
+                  <Toggle
+                    label="Light Theme"
+                    description="Switch between dark and light color scheme"
+                    checked={store.theme === 'light'}
+                    onChange={(val) => store.setTheme(val ? 'light' : 'dark')}
+                  />
+                </div>
+              </Card>
+
+              <Card>
+                <div className="flex items-center gap-2 mb-5">
+                  <FlaskConical size={16} className="text-amber-400" />
+                  <h3 className="text-sm font-semibold">Demo Mode</h3>
+                </div>
+                <div className="space-y-3">
+                  <Toggle
+                    label="Enable Demo Mode"
+                    description="Explore the terminal with simulated data — no API key required"
+                    checked={store.isDemoMode}
+                    onChange={store.setIsDemoMode}
+                  />
+                  {store.isDemoMode && (
+                    <div className="flex items-start gap-2 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+                      <FlaskConical size={14} className="text-amber-400 shrink-0 mt-0.5" />
+                      <p className="text-xs text-amber-400 leading-relaxed">
+                        Demo mode active. Prices fluctuate in real-time via simulation. No real orders will be placed.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </Card>
             </div>

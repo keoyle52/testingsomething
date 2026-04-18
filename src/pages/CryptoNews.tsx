@@ -43,7 +43,7 @@ export const CryptoNews: React.FC = () => {
   useEffect(() => {
     if (!sosoApiKey) return;
     fetchSosoCoins()
-      .then((list) => setCoins(list.slice(0, 80)))
+      .then((list) => setCoins(list.slice(0, 20)))
       .catch(() => {});
   }, [sosoApiKey]);
 
@@ -60,14 +60,13 @@ export const CryptoNews: React.FC = () => {
     try {
       const cats = selectedCats.length > 0 ? selectedCats : ALL_CATS;
       const result = selectedCoin
-        ? await fetchSosoNewsByCurrency(selectedCoin.id, p, 20, cats)
-        : await fetchSosoNews(p, 20, cats);
+        ? await fetchSosoNewsByCurrency(selectedCoin.id, p, 5, cats)
+        : await fetchSosoNews(p, 5, cats);
 
       const items = result.list ?? [];
-      const totalPages = Math.max(1, Math.ceil(result.total / Math.max(result.pageSize, 1)));
       setNews((prev) => replace ? items : [...prev, ...items]);
       setPage(result.page || p);
-      setHasMore(totalPages > (result.page || p));
+      setHasMore(false);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load news';
       toast.error(msg);

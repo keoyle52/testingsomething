@@ -4,10 +4,10 @@ const DUMMY_CONTRACT = '0x0000000000000000000000000000000000000000';
 
 type DomainType = 'spot' | 'futures';
 
-export const getDomain = (type: DomainType) => ({
+export const getDomain = (type: DomainType, isTestnet = false) => ({
   name: type,
   version: '1',
-  chainId: 286623, // Go SDK uses 286623 for both testnet and mainnet
+  chainId: isTestnet ? 138565 : 286623,
   verifyingContract: DUMMY_CONTRACT,
 });
 
@@ -78,7 +78,7 @@ export async function signPayload(
   payload: Record<string, unknown>,
   privateKey: string,
   type: DomainType,
-  _isTestnet: boolean,
+  isTestnet: boolean,
   apiKey?: string,
 ): Promise<{ signature: string; nonce: string }> {
   const wallet = new ethers.Wallet(privateKey);
@@ -93,7 +93,7 @@ export async function signPayload(
   const payloadString = JSON.stringify(signingPayload);
   const payloadHash = ethers.keccak256(ethers.toUtf8Bytes(payloadString));
 
-  const domain = getDomain(type);
+  const domain = getDomain(type, isTestnet);
   const values = {
     payloadHash,
     nonce,

@@ -18,6 +18,8 @@ import {
   fetchTickers,
   fetchMarkPrices,
 } from '../api/services';
+import { DEMO_TICKERS, DEMO_BALANCE, DEMO_TOTAL_PNL, DEMO_POSITIONS } from '../api/demoData';
+import { useLiveTicker } from '../api/useLiveTicker';
 
 interface TickerRow {
   symbol: string;
@@ -27,19 +29,32 @@ interface TickerRow {
 }
 
 export const Dashboard: React.FC = () => {
-  const { apiKeyName, privateKey, defaultSymbol, isTestnet } = useSettingsStore();
+  const { apiKeyName, privateKey, defaultSymbol, isTestnet, isDemoMode } = useSettingsStore();
   const hasKeys = !!(apiKeyName && privateKey);
 
   const [balance, setBalance] = useState(0);
   const [positionsCount, setPositionsCount] = useState(0);
   const [totalPnl, setTotalPnl] = useState(0);
-  const [tickers, setTickers] = useState<TickerRow[]>([]);
+  const [rawTickers, setRawTickers] = useState<TickerRow[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Live WS tickers layered on top of REST-fetched base data
+  const liveTickers = useLiveTicker(rawTickers, rawTickers.map((t) => t.symbol));
+  const tickers = liveTickers.length > 0 ? liveTickers : rawTickers;
+
   const loadData = useCallback(async () => {
+    if (isDemoMode) {
+      setRawTickers(DEMO_TICKERS);
+      setBalance(DEMO_BALANCE);
+      setPositionsCount(DEMO_POSITIONS.length);
+      setTotalPnl(DEMO_TOTAL_PNL);
+      setLoading(false);
+      return;
+    }
+
     try {
-      const rawTickers = await fetchTickers('perps');
-      const tickersArr = Array.isArray(rawTickers) ? rawTickers : [];
+      const rawTickersRes = await fetchTickers('perps');
+      const tickersArr = Array.isArray(rawTickersRes) ? rawTickersRes : [];
       const mapped: TickerRow[] = tickersArr
         .filter((t: Record<string, unknown>) => t.symbol)
         .map((t: Record<string, unknown>) => ({
@@ -50,7 +65,7 @@ export const Dashboard: React.FC = () => {
         }))
         .sort((a: TickerRow, b: TickerRow) => b.volume24h - a.volume24h)
         .slice(0, 20);
-      setTickers(mapped);
+      setRawTickers(mapped);
 
       if (hasKeys) {
         const [rawBalances, rawPositions, rawPrices] = await Promise.all([
@@ -91,13 +106,14 @@ export const Dashboard: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [hasKeys]);
+  }, [hasKeys, isDemoMode]);
 
   useEffect(() => {
     loadData();
+    if (isDemoMode) return;
     const timer = globalThis.setInterval(loadData, 15_000);
     return () => clearInterval(timer);
-  }, [loadData]);
+  }, [loadData, isDemoMode]);
 
   function formatCompact(value: number): string {
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
@@ -107,22 +123,32 @@ export const Dashboard: React.FC = () => {
 
   return (
     <div className="p-4 md:p-6 flex flex-col gap-4 md:gap-5 h-[calc(100vh-52px)] overflow-y-auto">
+      {/* Demo Mode Banner */}
+      {isDemoMode && (
+        <div className="shrink-0 flex items-center gap-3 px-4 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-medium">
+          <Activity size={13} className="shrink-0" />
+          <span>
+            <strong>Demo Mode</strong> — Simulated data with live price fluctuations. Connect your API key in Settings to trade live.
+          </span>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between shrink-0">
         <div>
           <h1 className="text-lg font-semibold">Dashboard</h1>
           <p className="text-xs text-text-muted mt-0.5">
-            {isTestnet ? 'Testnet' : 'Mainnet'} — Overview
+            {isDemoMode ? 'Demo Mode' : (isTestnet ? 'Testnet' : 'Mainnet')} — Overview
           </p>
         </div>
-        <div className="badge badge-primary">
+        <div className={`badge ${isDemoMode ? 'badge-neutral' : 'badge-primary'}`}>
           <Activity size={11} />
-          {loading ? 'Loading...' : 'Live'}
+          {loading ? 'Loading...' : isDemoMode ? 'Demo' : 'Live'}
         </div>
       </div>
 
       {/* Stats Grid */}
-      {hasKeys && (
+      {(hasKeys || isDemoMode) && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 shrink-0">
           <StatCard
             label="Balance"

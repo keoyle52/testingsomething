@@ -1,0 +1,98 @@
+// ─── Demo / Mock Data for SoDEX Terminal ─────────────────────────────────────
+// Used when isDemoMode = true so juries/guests can explore without API keys.
+
+export const DEMO_TICKERS = [
+  { symbol: 'BTC-USD', lastPrice: 84312.5,  change24h:  2.34, volume24h: 1_820_430_000 },
+  { symbol: 'ETH-USD', lastPrice:  3241.8,  change24h: -1.12, volume24h:   820_150_000 },
+  { symbol: 'SOL-USD', lastPrice:   178.4,  change24h:  4.87, volume24h:   412_340_000 },
+  { symbol: 'BNB-USD', lastPrice:   612.3,  change24h:  0.91, volume24h:   190_210_000 },
+  { symbol: 'ARB-USD', lastPrice:     1.24, change24h: -3.45, volume24h:   143_000_000 },
+  { symbol: 'OP-USD',  lastPrice:     2.87, change24h:  5.12, volume24h:   112_000_000 },
+  { symbol: 'AVAX-USD',lastPrice:    38.9,  change24h:  1.76, volume24h:    98_000_000 },
+  { symbol: 'DOGE-USD',lastPrice:     0.182,change24h: -2.08, volume24h:    87_000_000 },
+  { symbol: 'LINK-USD',lastPrice:    14.72, change24h:  3.21, volume24h:    76_000_000 },
+  { symbol: 'SUI-USD', lastPrice:     2.11, change24h:  7.43, volume24h:    65_000_000 },
+  { symbol: 'WLD-USD', lastPrice:     4.03, change24h: -1.55, volume24h:    54_000_000 },
+  { symbol: 'INJ-USD', lastPrice:    28.6,  change24h:  2.88, volume24h:    48_000_000 },
+];
+
+export const DEMO_POSITIONS = [
+  {
+    symbol: 'BTC-USD',
+    side: 'LONG',
+    size: 0.15,
+    avgEntryPrice: 81_200,
+    markPrice: 84_312.5,
+    leverage: 5,
+    unrealizedPnl: 466.9,
+    margin: 2_436,
+  },
+  {
+    symbol: 'ETH-USD',
+    side: 'SHORT',
+    size: 2.5,
+    avgEntryPrice: 3_310,
+    markPrice: 3_241.8,
+    leverage: 3,
+    unrealizedPnl: 170.5,
+    margin: 2_758,
+  },
+  {
+    symbol: 'SOL-USD',
+    side: 'LONG',
+    size: 12,
+    avgEntryPrice: 165.2,
+    markPrice: 178.4,
+    leverage: 4,
+    unrealizedPnl: 158.4,
+    margin: 495.6,
+  },
+];
+
+export const DEMO_BALANCE = 12_450.75;
+export const DEMO_TOTAL_PNL = 795.8;
+
+export const DEMO_FUNDING_RATES = [
+  { symbol: 'BTC-USD', fundingRate: 0.0001,  nextFundingTime: Date.now() + 3_600_000, markPrice: 84_312.5 },
+  { symbol: 'ETH-USD', fundingRate: -0.00015, nextFundingTime: Date.now() + 3_600_000, markPrice: 3_241.8  },
+  { symbol: 'SOL-USD', fundingRate: 0.00022,  nextFundingTime: Date.now() + 3_600_000, markPrice: 178.4    },
+  { symbol: 'BNB-USD', fundingRate: 0.00008,  nextFundingTime: Date.now() + 3_600_000, markPrice: 612.3    },
+  { symbol: 'ARB-USD', fundingRate: -0.0003,  nextFundingTime: Date.now() + 3_600_000, markPrice: 1.24     },
+  { symbol: 'OP-USD',  fundingRate: 0.00018,  nextFundingTime: Date.now() + 3_600_000, markPrice: 2.87     },
+];
+
+export const DEMO_OPEN_ORDERS = [
+  { orderId: 'demo-001', symbol: 'BTC-USD', side: 'BUY',  type: 'LIMIT', price: 82_000, quantity: 0.05, status: 'OPEN' },
+  { orderId: 'demo-002', symbol: 'ETH-USD', side: 'SELL', type: 'LIMIT', price: 3_400,  quantity: 1.2,  status: 'OPEN' },
+];
+
+// Simulated live price fluctuation — ±0.15% per tick
+export function getDemoLivePrice(basePrice: number): number {
+  const delta = basePrice * (Math.random() * 0.003 - 0.0015);
+  return parseFloat((basePrice + delta).toFixed(2));
+}
+
+// Generate fake candle history for a symbol (last 60 candles, 1-min)
+export function getDemoCandleHistory(basePrice: number) {
+  const candles = [];
+  let price = basePrice * 0.97;
+  const now = Date.now();
+  for (let i = 59; i >= 0; i--) {
+    const open = price;
+    const change = price * (Math.random() * 0.008 - 0.004);
+    const close = price + change;
+    const high = Math.max(open, close) * (1 + Math.random() * 0.002);
+    const low  = Math.min(open, close) * (1 - Math.random() * 0.002);
+    const volume = Math.random() * 500 + 50;
+    candles.push({
+      time: Math.floor((now - i * 60_000) / 1000),
+      open: parseFloat(open.toFixed(2)),
+      high: parseFloat(high.toFixed(2)),
+      low:  parseFloat(low.toFixed(2)),
+      close: parseFloat(close.toFixed(2)),
+      volume: parseFloat(volume.toFixed(3)),
+    });
+    price = close;
+  }
+  return candles;
+}

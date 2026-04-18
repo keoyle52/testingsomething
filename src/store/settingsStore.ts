@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
+export type Theme = 'dark' | 'light';
+
 interface SettingsState {
   apiKeyName: string;
   privateKey: string;
@@ -10,6 +12,8 @@ interface SettingsState {
   toastsEnabled: boolean;
   sosoApiKey: string;
   geminiApiKey: string;
+  isDemoMode: boolean;
+  theme: Theme;
   setApiKeyName: (val: string) => void;
   setPrivateKey: (val: string) => void;
   setIsTestnet: (val: boolean) => void;
@@ -18,6 +22,8 @@ interface SettingsState {
   setToastsEnabled: (val: boolean) => void;
   setSosoApiKey: (val: string) => void;
   setGeminiApiKey: (val: string) => void;
+  setIsDemoMode: (val: boolean) => void;
+  setTheme: (val: Theme) => void;
   disconnect: () => void;
 }
 
@@ -32,6 +38,8 @@ export const useSettingsStore = create<SettingsState>()(
       toastsEnabled: true,
       sosoApiKey: '',
       geminiApiKey: '',
+      isDemoMode: false,
+      theme: 'dark',
       setApiKeyName: (val) => set({ apiKeyName: val }),
       setPrivateKey: (val) => set({ privateKey: val }),
       setIsTestnet: (val) => set({ isTestnet: val }),
@@ -40,6 +48,8 @@ export const useSettingsStore = create<SettingsState>()(
       setToastsEnabled: (val) => set({ toastsEnabled: val }),
       setSosoApiKey: (val) => set({ sosoApiKey: val }),
       setGeminiApiKey: (val) => set({ geminiApiKey: val }),
+      setIsDemoMode: (val) => set({ isDemoMode: val }),
+      setTheme: (val) => set({ theme: val }),
       disconnect: () => set({ apiKeyName: '', privateKey: '' }),
     }),
     {
@@ -52,6 +62,8 @@ export const useSettingsStore = create<SettingsState>()(
         toastsEnabled: state.toastsEnabled,
         sosoApiKey: state.sosoApiKey,
         geminiApiKey: state.geminiApiKey,
+        isDemoMode: state.isDemoMode,
+        theme: state.theme,
         // privateKey intentionally excluded — never stored in localStorage
       }),
     }

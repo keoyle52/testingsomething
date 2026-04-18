@@ -30,13 +30,28 @@ perpsClient.interceptors.request.use(async (config) => {
   const apiKeyAddress = resolveApiKeyAddress(apiKeyName, privateKey);
 
   // Only sign write (non-GET) requests
-  if (method !== 'GET' && apiKeyAddress && privateKey) {
+  if (method !== 'GET' && privateKey) {
     const payload = config.data || {};
-
     const actionType = deriveActionType(method, config.url ?? '');
+
+    // Testnet: API keys are NOT registered — sign with private key directly,
+    // use wallet address as X-API-Key.
+    // Mainnet: use the registered apiKeyName address as X-API-Key.
+    let signingKey = apiKeyAddress;
+    if (isTestnet) {
+      try {
+        const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
+        signingKey = new ethers.Wallet(pk).address.toLowerCase();
+      } catch {
+        signingKey = apiKeyAddress;
+      }
+    }
+
+    if (!signingKey) return config;
+
     try {
-      const { signature, nonce } = await signPayload(actionType, payload, privateKey, 'futures', isTestnet, apiKeyAddress);
-      config.headers['X-API-Key'] = apiKeyAddress;
+      const { signature, nonce } = await signPayload(actionType, payload, privateKey, 'futures', isTestnet, signingKey);
+      config.headers['X-API-Key'] = signingKey;
       config.headers['X-API-Nonce'] = nonce;
       config.headers['X-API-Sign'] = signature;
     } catch (error) {
