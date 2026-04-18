@@ -274,6 +274,7 @@ async function fetchReferencePrice(
   throw new Error(`No valid reference price found for ${normalizedSym}`);
 }
 
+// Helper to extract error message from various error formats
 function extractApiErrorMessage(err: unknown): string {
   const e = err as {
     message?: unknown;
@@ -420,8 +421,8 @@ export async function fetchPerpsAccountState(): Promise<{ accountID: number; [ke
     assertNoBodyError(body);
     accountID = extractAccountIDDeep(body);
     parsed = unwrapEnvelopeData(body);
-  } catch (err) {
-    console.warn('[fetchPerpsAccountState] /state failed:', err);
+  } catch {
+    // Endpoint unavailable, try next
   }
 
   // --- Attempt 2: /balances ---
@@ -431,8 +432,8 @@ export async function fetchPerpsAccountState(): Promise<{ accountID: number; [ke
       // Debug: balances endpoint response
       accountID = extractAccountIDDeep(body);
       if (Object.keys(parsed).length === 0) parsed = unwrapEnvelopeData(body);
-    } catch (err) {
-      console.warn('[fetchPerpsAccountState] /balances also failed:', err);
+    } catch {
+      // Endpoint unavailable, try next
     }
   }
 
@@ -480,8 +481,8 @@ export async function fetchSpotAccountState(): Promise<{ accountID: number; [key
     assertNoBodyError(body);
     accountID = extractAccountIDDeep(body);
     parsed = unwrapEnvelopeData(body);
-  } catch (err) {
-    console.warn('[fetchSpotAccountState] /state failed:', err);
+  } catch {
+    // Endpoint unavailable, try next
   }
 
   if (accountID == null) {
@@ -490,13 +491,13 @@ export async function fetchSpotAccountState(): Promise<{ accountID: number; [key
       // Debug: spot balances response
       accountID = extractAccountIDDeep(body);
       if (Object.keys(parsed).length === 0) parsed = unwrapEnvelopeData(body);
-    } catch (err) {
-      console.warn('[fetchSpotAccountState] /balances also failed:', err);
+    } catch {
+      // Endpoint unavailable, try next
     }
   }
 
   if (accountID == null) {
-    throw new Error('fetchSpotAccountState: accountID not found. Check browser console.');
+    throw new Error('fetchSpotAccountState: accountID not found');
   }
 
   // Spot account resolved
@@ -800,66 +801,9 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<unknown> {
 
   // Order payload prepared
 
-  let data: unknown;
-  try {
-    const res = await withRetry(() => perpsClient.post('/trade/orders', payload));
-    data = res?.data ?? res ?? {};
-    assertNoBodyError(data);
-  } catch (err) {
-    // Some environments reject market BUY quantity while accepting funds.
-    // Retry once with `funds` if we hit the known server-side quantity validation error.
-    const isMarketBuy = params.type === 2 && params.side === 1;
-    const isQuantityInvalid = extractApiErrorMessage(err).includes('quantity is invalid');
-    if (!isMarketBuy || !isQuantityInvalid) throw err;
-
-    const refPrice = await fetchReferencePrice(params.symbol, 'perps', params.side);
-    const quantityAsNumber = parseFloat(quantity);
-    const funds = (quantityAsNumber * refPrice).toFixed(Math.max(2, Math.min(pricePrecision, 8))).replace(/\.?0+$/, '');
-
-    // Retry #1: quantity again but forced plain-trim format.
-    const fallbackQtyOrder: Record<string, unknown> = {
-      clOrdID: generateClOrdID(),
-      modifier: 1,
-      side: params.side,
-      type: params.type,
-      timeInForce,
-      quantity: String(quantityAsNumber),
-      reduceOnly: false,
-      positionSide: 1,
-    };
-    const fallbackQtyPayload = {
-      accountID: numericAccountID,
-      symbolID: Number(symbolID),
-      orders: [fallbackQtyOrder],
-    };
-    try {
-      const retryRes = await withRetry(() => perpsClient.post('/trade/orders', fallbackQtyPayload));
-      data = retryRes?.data ?? retryRes ?? {};
-      assertNoBodyError(data);
-    } catch (retryErr) {
-      // Retry #2: use funds for market BUY only.
-      const retryIsQuantityInvalid = extractApiErrorMessage(retryErr).includes('quantity is invalid');
-      if (!retryIsQuantityInvalid) throw retryErr;
-      const fallbackOrder: Record<string, unknown> = {
-        clOrdID: generateClOrdID(),
-        modifier: 1,
-        side: params.side,
-        type: params.type,
-        timeInForce,
-        funds,
-        reduceOnly: false,
-        positionSide: 1,
-      };
-      const fallbackPayload = {
-        accountID: numericAccountID,
-        symbolID: Number(symbolID),
-        orders: [fallbackOrder],
-      };
-      const fallbackRes = await withRetry(() => perpsClient.post('/trade/orders', fallbackPayload));
-      data = fallbackRes?.data ?? fallbackRes ?? {};
-      assertNoBodyError(data);
-    }
-  }
+  const res = await withRetry(() => perpsClient.post('/trade/orders', payload));
+  const data = res?.data ?? res ?? {};
+  assertNoBodyError(data);
 
   // Unwrap the first order result from the response array
   const resultData = data as Record<string, unknown> | unknown[];
