@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { wsService } from './websocket';
 import { useSettingsStore } from '../store/settingsStore';
-import { getDemoLivePrice } from './demoData';
+import { subscribeToDemoTicks, getDemoTickers } from './demoEngine';
 
 export interface LiveTicker {
   symbol: string;
@@ -11,31 +11,32 @@ export interface LiveTicker {
   markPrice?: number;
 }
 
-// ─── Demo mode: simulates live price ticks every 2s ─────────────────────────
-function useDemoTickers(initialTickers: LiveTicker[]): LiveTicker[] {
-  const [tickers, setTickers] = useState<LiveTicker[]>(initialTickers);
-  const baseRef = useRef(initialTickers);
+// ─── Demo mode: subscribe to the demo engine's per-tick notification ─────────
+function useDemoTickers(): LiveTicker[] {
+  const [tickers, setTickers] = useState<LiveTicker[]>(() => mapDemoSnapshot());
 
   useEffect(() => {
-    baseRef.current = initialTickers;
-    setTickers(initialTickers);
-  }, [initialTickers]);
-
-  useEffect(() => {
-    if (baseRef.current.length === 0) return;
-    const interval = setInterval(() => {
-      setTickers((prev) =>
-        prev.map((t) => ({
-          ...t,
-          lastPrice: getDemoLivePrice(t.lastPrice),
-          markPrice: getDemoLivePrice(t.lastPrice),
-        }))
-      );
-    }, 2000);
-    return () => clearInterval(interval);
+    // Initial snapshot + live subscription. The engine is started elsewhere
+    // in the app boot sequence when `isDemoMode` flips on.
+    setTickers(mapDemoSnapshot());
+    const unsub = subscribeToDemoTicks(() => {
+      setTickers(mapDemoSnapshot());
+    });
+    return unsub;
   }, []);
 
   return tickers;
+}
+
+function mapDemoSnapshot(): LiveTicker[] {
+  const rows = getDemoTickers('perps');
+  return rows.map((t) => ({
+    symbol: t.symbol,
+    lastPrice: t.lastPrice,
+    change24h: t.priceChangePercent,
+    volume24h: parseFloat(String(t.quoteVolume)),
+    markPrice: t.markPrice,
+  }));
 }
 
 // ─── Real WebSocket mode ─────────────────────────────────────────────────────
@@ -89,10 +90,16 @@ export function useLiveTicker(
 ): LiveTicker[] {
   const { isDemoMode, isTestnet } = useSettingsStore();
 
-  const demoTickers = useDemoTickers(isDemoMode ? initialTickers : []);
+  const demoTickers = useDemoTickers();
   const wsTickers   = useWsTickers(isDemoMode ? [] : symbols, isTestnet);
 
-  if (isDemoMode) return demoTickers;
+  if (isDemoMode) {
+    // Ensure that consumers that seed from `initialTickers` still see only
+    // the requested symbol set if any; otherwise return the full feed.
+    if (initialTickers.length === 0) return demoTickers;
+    const byKey = new Map(demoTickers.map((t) => [t.symbol, t]));
+    return initialTickers.map((t) => byKey.get(t.symbol) ?? t);
+  }
 
   // Merge: ws data overrides initial where available, fall back to initial
   if (wsTickers.length > 0) {
@@ -117,14 +124,21 @@ export function useLivePrice(symbol: string, fallback = 0): number {
     baseRef.current = fallback > 0 ? fallback : baseRef.current;
   }, [fallback]);
 
-  // Demo mode: tick every 1.5s
+  // Demo mode: subscribe to the engine tick for the requested symbol.
   useEffect(() => {
-    if (!isDemoMode || baseRef.current === 0) return;
-    const interval = setInterval(() => {
-      setPrice(getDemoLivePrice(baseRef.current));
-    }, 1500);
-    return () => clearInterval(interval);
-  }, [isDemoMode]);
+    if (!isDemoMode || !symbol) return;
+    const readFromEngine = () => {
+      const rows = getDemoTickers('perps');
+      const target = rows.find((t) => t.symbol === symbol);
+      if (target && target.lastPrice > 0) {
+        setPrice(target.lastPrice);
+        baseRef.current = target.lastPrice;
+      }
+    };
+    readFromEngine();
+    const unsub = subscribeToDemoTicks(readFromEngine);
+    return unsub;
+  }, [isDemoMode, symbol]);
 
   // WS mode
   useEffect(() => {

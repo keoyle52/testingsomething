@@ -18,7 +18,6 @@ import {
   fetchTickers,
   fetchMarkPrices,
 } from '../api/services';
-import { DEMO_TICKERS, DEMO_BALANCE, DEMO_TOTAL_PNL, DEMO_POSITIONS } from '../api/demoData';
 import { useLiveTicker } from '../api/useLiveTicker';
 
 interface TickerRow {
@@ -47,15 +46,10 @@ export const Dashboard: React.FC = () => {
   const tickers = liveTickers.length > 0 ? liveTickers : rawTickers;
 
   const loadData = useCallback(async () => {
-    if (isDemoMode) {
-      setRawTickers(DEMO_TICKERS);
-      setBalance(DEMO_BALANCE);
-      setPositionsCount(DEMO_POSITIONS.length);
-      setTotalPnl(DEMO_TOTAL_PNL);
-      setLoading(false);
-      return;
-    }
-
+    // In demo mode `fetchTickers / fetchBalances / fetchPositions` are all
+    // routed to `demoEngine`, so the same code path works for both modes.
+    // We just gate the account calls on whether a private key (or demo
+    // engine) can provide account data.
     try {
       const rawTickersRes = await fetchTickers('perps');
       const tickersArr = Array.isArray(rawTickersRes) ? rawTickersRes : [];
@@ -71,7 +65,7 @@ export const Dashboard: React.FC = () => {
         .slice(0, 20);
       setRawTickers(mapped);
 
-      if (hasKeys) {
+      if (hasKeys || isDemoMode) {
         const [rawBalances, rawPositions, rawPrices] = await Promise.all([
           fetchBalances('perps'),
           fetchPositions(),
@@ -114,8 +108,10 @@ export const Dashboard: React.FC = () => {
 
   useEffect(() => {
     loadData();
-    if (isDemoMode) return;
-    const timer = globalThis.setInterval(loadData, 15_000);
+    // Poll for fresh balance / position / PnL data. Demo engine updates
+    // tick-by-tick, so we re-read more frequently when mocked so the UI feels
+    // snappy without flooding a live API.
+    const timer = globalThis.setInterval(loadData, isDemoMode ? 3_000 : 15_000);
     return () => clearInterval(timer);
   }, [loadData, isDemoMode]);
 

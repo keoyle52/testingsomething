@@ -4,18 +4,20 @@ import { useSettingsStore } from '../store/settingsStore';
 import { Wifi, WifiOff, Settings, Sun, Moon, FlaskConical } from 'lucide-react';
 
 const PAGE_TITLES: Record<string, string> = {
-  '/dashboard': 'Dashboard',
-  '/volume-bot': 'Volume Bot',
-  '/grid-bot': 'Grid Bot',
-  '/twap-bot': 'TWAP Bot',
-  '/dca-bot': 'DCA Bot',
-  '/copy-trader': 'Copy Trader',
-  '/positions': 'Position Monitor',
-  '/funding': 'Funding Tracker',
-  '/schedule-cancel': 'Schedule Cancel',
-  '/alerts': 'Fiyat Alarmlari',
-  '/backtesting': 'Backtesting',
-  '/settings': 'Settings',
+  '/dashboard':       'Dashboard',
+  '/grid-bot':        'Grid Bot',
+  '/twap-bot':        'TWAP Bot',
+  '/dca-bot':         'DCA Bot',
+  '/news-bot':        'News Bot',
+  '/copy-trader':     'Copy Trader',
+  '/positions':       'Positions',
+  '/funding':         'Funding Tracker',
+  '/schedule-cancel': "Dead Man's Switch",
+  '/alerts':          'Price Alerts',
+  '/backtesting':     'Backtesting',
+  '/etf-tracker':     'ETF Tracker',
+  '/news':            'Crypto News',
+  '/settings':        'Settings',
 };
 
 export const Topbar: React.FC = () => {

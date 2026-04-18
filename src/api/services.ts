@@ -2,8 +2,39 @@ import { perpsClient } from './perpsClient';
 import { spotClient } from './spotClient';
 import { useSettingsStore } from '../store/settingsStore';
 import { deriveAddressFromPrivateKey } from './signer';
+import {
+  demoPlaceOrder,
+  demoPlaceBatchOrders,
+  demoCancelOrder,
+  demoBatchCancelOrders,
+  demoCancelAllOrders,
+  demoReplaceOrders,
+  demoScheduleCancelAll,
+  demoUpdateLeverage,
+  getDemoTickers,
+  getDemoMiniTickers,
+  getDemoBookTickers,
+  getDemoMarkPrices,
+  getDemoFundingRates,
+  getDemoOrderbook,
+  getDemoKlines,
+  getDemoBalances,
+  getDemoPositions,
+  getDemoOpenOrders,
+  getDemoOrderHistory,
+  getDemoAccountFills,
+  getDemoAccountState,
+  getDemoFeeRate,
+  getDemoOrderStatus,
+  type DemoReplaceInput,
+} from './demoEngine';
 
 // ---------- internal helpers ----------
+
+/** True when demo mode is active — every service function short-circuits to `demoEngine`. */
+function isDemo(): boolean {
+  return useSettingsStore.getState().isDemoMode;
+}
 
 /**
  * Throw if the exchange returned a body-level error even though HTTP was 200.
@@ -160,9 +191,42 @@ function parseOrderIdNumeric(orderId: string): number {
 // ---------- Market Data (Public) ----------
 
 export async function fetchSymbols(market: 'spot' | 'perps' = 'perps') {
+  if (isDemo()) {
+    // Derive a minimal symbol list from the demo ticker snapshot so callers
+    // like `fetchSymbolEntry` still get a sensible record for any symbol.
+    return getDemoTickers(market).map((t) => ({
+      symbol: t.symbol,
+      name: t.symbol,
+      symbolID: Math.abs(hashCode(t.symbol)) % 10_000 + 1,
+      pricePrecision: 2,
+      tickSize: '0.01',
+      quantityPrecision: 4,
+      stepSize: '0.0001',
+      minQuantity: '0.0001',
+      maxQuantity: '1000000',
+      marketMinQuantity: '0.0001',
+      marketMaxQuantity: '1000000',
+      minNotional: '1',
+      maxNotional: '10000000',
+      maxLeverage: 50,
+      initLeverage: 5,
+      lastTradePrice: String(t.lastPrice),
+      status: 'TRADING',
+    }));
+  }
   const client = getClient(market);
   const res = await withRetry(() => client.get('/markets/symbols'));
   return res?.data ?? res ?? [];
+}
+
+/** Deterministic 32-bit hash used to generate stable demo symbolIDs. */
+function hashCode(str: string): number {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h) + str.charCodeAt(i);
+    h |= 0;
+  }
+  return h;
 }
 
 export interface SymbolPrecision {
@@ -440,6 +504,7 @@ function extractAccountIDDeep(raw: unknown): number | null {
  * Results are cached for ACCOUNT_STATE_CACHE_TTL ms.
  */
 export async function fetchPerpsAccountState(): Promise<{ accountID: number; [key: string]: unknown }> {
+  if (isDemo()) return getDemoAccountState('perps') as { accountID: number; [key: string]: unknown };
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   // Cache key namespaced by network — testnet/mainnet accountIDs differ for the same address.
@@ -493,6 +558,7 @@ export async function fetchPerpsAccountState(): Promise<{ accountID: number; [ke
  * Same pattern as perps: interceptor already unwraps response.data.
  */
 export async function fetchSpotAccountState(): Promise<{ accountID: number; [key: string]: unknown }> {
+  if (isDemo()) return getDemoAccountState('spot') as { accountID: number; [key: string]: unknown };
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   // Cache key namespaced by network — testnet/mainnet accountIDs differ for the same address.
@@ -548,6 +614,7 @@ export async function fetchSpotSymbolID(symbol: string): Promise<number | null> 
 }
 
 export async function fetchTickers(market: 'spot' | 'perps' = 'perps') {
+  if (isDemo()) return getDemoTickers(market);
   const client = getClient(market);
   const res = await withRetry(() => client.get('/markets/tickers'));
   const raw = res?.data ?? res ?? [];
@@ -565,12 +632,14 @@ export async function fetchTickers(market: 'spot' | 'perps' = 'perps') {
 }
 
 export async function fetchMiniTickers(market: 'spot' | 'perps' = 'perps') {
+  if (isDemo()) return getDemoMiniTickers(market);
   const client = getClient(market);
   const res = await withRetry(() => client.get('/markets/miniTickers'));
   return res?.data ?? res ?? [];
 }
 
 export async function fetchBookTickers(market: 'spot' | 'perps' = 'perps') {
+  if (isDemo()) return getDemoBookTickers(market);
   const client = getClient(market);
   const res = await withRetry(() => client.get('/markets/bookTickers'));
   const raw = res?.data ?? res ?? [];
@@ -586,6 +655,7 @@ export async function fetchBookTickers(market: 'spot' | 'perps' = 'perps') {
 }
 
 export async function fetchOrderbook(symbol: string, market: 'spot' | 'perps' = 'perps', limit = 20) {
+  if (isDemo()) return getDemoOrderbook(symbol, market, limit);
   const client = getClient(market);
   const sym = normalizeSymbol(symbol, market);
   const res = await withRetry(() => client.get(`/markets/${sym}/orderbook`, { params: { limit } }));
@@ -598,6 +668,7 @@ export async function fetchKlines(
   limit = 100,
   market: 'spot' | 'perps' = 'perps',
 ) {
+  if (isDemo()) return getDemoKlines(symbol, interval, limit);
   const client = getClient(market);
   const sym = normalizeSymbol(symbol, market);
   const res = await withRetry(() => client.get(`/markets/${sym}/klines`, { params: { interval, limit } }));
@@ -624,11 +695,13 @@ export async function fetchCoins(market: 'spot' | 'perps' = 'perps') {
 }
 
 export async function fetchMarkPrices() {
+  if (isDemo()) return getDemoMarkPrices();
   const res = await withRetry(() => perpsClient.get('/markets/mark-prices'));
   return res?.data ?? res ?? [];
 }
 
 export async function fetchFundingRates() {
+  if (isDemo()) return getDemoFundingRates();
   const res = await withRetry(() => perpsClient.get('/markets/funding-rates'));
   return res?.data ?? res ?? [];
 }
@@ -636,6 +709,7 @@ export async function fetchFundingRates() {
 // ---------- Account (Private) ----------
 
 export async function fetchAccountInfo(market: 'spot' | 'perps' = 'perps') {
+  if (isDemo()) return getDemoAccountState(market);
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const client = getClient(market);
@@ -644,6 +718,7 @@ export async function fetchAccountInfo(market: 'spot' | 'perps' = 'perps') {
 }
 
 export async function fetchBalances(market: 'spot' | 'perps' = 'perps') {
+  if (isDemo()) return getDemoBalances(market);
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const client = getClient(market);
@@ -654,6 +729,7 @@ export async function fetchBalances(market: 'spot' | 'perps' = 'perps') {
 }
 
 export async function fetchPositions() {
+  if (isDemo()) return getDemoPositions();
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const res = await withRetry(() => perpsClient.get(`/accounts/${address}/positions`));
@@ -674,6 +750,7 @@ export async function fetchPositions() {
  * open-order book for accounts with lots of open orders.
  */
 export async function fetchOpenOrders(market: 'spot' | 'perps' = 'perps', symbol?: string) {
+  if (isDemo()) return getDemoOpenOrders(market, symbol);
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const client = getClient(market);
@@ -858,6 +935,7 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<unknown> {
 }
 
 export async function placeOrder(params: PlaceOrderParams, market: 'spot' | 'perps' = 'perps') {
+  if (isDemo()) return demoPlaceOrder(params, market);
   return market === 'perps' ? placePerpsOrder(params) : placeSpotOrder(params);
 }
 
@@ -874,6 +952,7 @@ export async function placeBatchOrders(
   market: 'spot' | 'perps',
 ): Promise<unknown[]> {
   if (ordersList.length === 0) return [];
+  if (isDemo()) return demoPlaceBatchOrders(ordersList, market);
 
   // All orders in a batch must share the same symbol
   const symbol = ordersList[0].symbol;
@@ -989,6 +1068,10 @@ export async function updatePerpsLeverage(
   leverage: number,
   marginMode: 1 | 2 = 2,
 ): Promise<void> {
+  if (isDemo()) {
+    demoUpdateLeverage(symbol, leverage, marginMode);
+    return;
+  }
   const [accountState, symbolID] = await Promise.all([
     fetchPerpsAccountState(),
     fetchPerpsSymbolID(symbol),
@@ -1021,6 +1104,10 @@ export async function updatePerpsMargin(
   symbol: string,
   amount: string | number,
 ): Promise<void> {
+  if (isDemo()) {
+    // Demo margin adjustment is a no-op; the engine sizes margin off leverage.
+    return;
+  }
   const [accountState, symbolID] = await Promise.all([
     fetchPerpsAccountState(),
     fetchPerpsSymbolID(symbol),
@@ -1045,6 +1132,7 @@ export async function updatePerpsMargin(
 }
 
 export async function cancelOrder(orderId: string, symbol: string, market: 'spot' | 'perps' = 'perps') {
+  if (isDemo()) return demoCancelOrder(orderId, symbol, market);
   if (market === 'perps') {
     const [accountState, symbolID] = await Promise.all([
       fetchPerpsAccountState(),
@@ -1122,6 +1210,7 @@ export async function cancelOrder(orderId: string, symbol: string, market: 'spot
  *   N round-trips).
  */
 export async function cancelAllOrders(symbol?: string, market: 'spot' | 'perps' = 'perps') {
+  if (isDemo()) return demoCancelAllOrders(symbol, market);
   const orders = await fetchOpenOrders(market, symbol);
   const ordersArray = Array.isArray(orders) ? orders : [];
   if (ordersArray.length === 0) return [];
@@ -1168,6 +1257,7 @@ export interface FeeRateInfo {
  * Falls back to default Tier-1 rates if the call fails (e.g. no wallet configured).
  */
 export async function fetchFeeRate(market: 'spot' | 'perps' = 'perps'): Promise<FeeRateInfo> {
+  if (isDemo()) return getDemoFeeRate();
   const normalizeFeeRate = (raw: number): number => {
     const abs = Math.abs(raw);
     // Convert percent-like values (e.g. 0.04 meaning 0.04%) to ratio (0.0004).
@@ -1201,6 +1291,7 @@ export async function fetchAccountOrders(
   market: 'spot' | 'perps' = 'perps',
   address?: string,
 ) {
+  if (isDemo()) return getDemoOpenOrders(market);
   const addr = address || getEvmAddress();
   if (!addr) throw new Error('No wallet configured');
   const client = getClient(market);
@@ -1235,6 +1326,7 @@ export async function fetchOrderStatus(
   symbol: string,
   market: 'spot' | 'perps' = 'perps',
 ): Promise<OrderStatusResult | null> {
+  if (isDemo()) return getDemoOrderStatus(orderId, symbol) as OrderStatusResult | null;
   const address = getEvmAddress();
   if (!address) return null;
   const client = getClient(market);
@@ -1303,6 +1395,7 @@ export async function fetchAccountFills(
   market: 'spot' | 'perps' = 'perps',
   limit = 20,
 ): Promise<unknown[]> {
+  if (isDemo()) return getDemoAccountFills(market, limit);
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   return fetchTargetAccountFills(market, address, limit);
@@ -1316,6 +1409,9 @@ export async function fetchTargetAccountFills(
   targetAddress: string,
   limit = 50,
 ): Promise<unknown[]> {
+  // In demo mode all trade data comes from the engine regardless of target
+  // — CopyTrader still gets a lively feed to work with.
+  if (isDemo()) return getDemoAccountFills(market, limit);
   const client = getClient(market);
   try {
     const res = await client.get(`/accounts/${targetAddress}/trades`, {
@@ -1370,6 +1466,7 @@ export async function batchCancelOrders(
   market: 'spot' | 'perps',
 ): Promise<unknown> {
   if (orderIds.length === 0) return {};
+  if (isDemo()) return demoBatchCancelOrders(orderIds, symbol, market);
 
   if (market === 'perps') {
     const [accountState, symbolID] = await Promise.all([
@@ -1438,6 +1535,9 @@ export async function replaceOrders(
   market: 'spot' | 'perps',
 ): Promise<unknown> {
   if (replacements.length === 0) return {};
+  if (isDemo()) {
+    return demoReplaceOrders(replacements as DemoReplaceInput[], market);
+  }
 
   const [accountState] = await Promise.all([
     market === 'perps' ? fetchPerpsAccountState() : fetchSpotAccountState(),
@@ -1524,6 +1624,16 @@ export async function modifyPerpsOrder(params: {
   quantity?: string | number;
   stopPrice?: string | number;
 }): Promise<unknown> {
+  if (isDemo()) {
+    // Demo engine treats TP/SL modify as a regular replacement.
+    return demoReplaceOrders([{
+      symbol: params.symbol,
+      origOrderID: params.orderID,
+      origClOrdID: params.clOrdID,
+      price: params.price,
+      quantity: params.quantity,
+    }], 'perps');
+  }
   const [accountState, symbolEntry] = await Promise.all([
     fetchPerpsAccountState(),
     fetchSymbolEntry(params.symbol, 'perps'),
@@ -1607,6 +1717,10 @@ export async function scheduleCancelAll(
   market: 'spot' | 'perps',
   scheduledTimestamp?: number,
 ): Promise<unknown> {
+  if (isDemo()) {
+    demoScheduleCancelAll(market, scheduledTimestamp);
+    return { code: 0 };
+  }
   const accountState = market === 'perps'
     ? await fetchPerpsAccountState()
     : await fetchSpotAccountState();
@@ -1647,6 +1761,7 @@ export async function fetchOrderHistory(
     limit?: number;
   } = {},
 ): Promise<unknown[]> {
+  if (isDemo()) return getDemoOrderHistory(market, params);
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const client = getClient(market);
@@ -1672,6 +1787,13 @@ export async function fetchPositionHistory(
     limit?: number;
   } = {},
 ): Promise<unknown[]> {
+  // Closed position history is intentionally empty in demo mode — there is
+  // no historical backfill, only live positions that exist right now.
+  if (isDemo()) {
+    const sym = params.symbol;
+    const open = getDemoPositions() as Array<{ symbol: string }>;
+    return sym ? open.filter((p) => p.symbol === sym) : open;
+  }
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const query: Record<string, unknown> = {};
