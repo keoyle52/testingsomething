@@ -7,7 +7,7 @@ type DomainType = 'spot' | 'futures';
 export const getDomain = (type: DomainType, isTestnet: boolean) => ({
   name: type,
   version: '1',
-  chainId: isTestnet ? 138565 : 286623,
+  chainId: 286623, // Go SDK uses 286623 for both testnet and mainnet
   verifyingContract: DUMMY_CONTRACT,
 });
 
