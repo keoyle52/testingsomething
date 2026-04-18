@@ -1,7 +1,7 @@
 import { perpsClient } from './perpsClient';
 import { spotClient } from './spotClient';
 import { useSettingsStore } from '../store/settingsStore';
-import { ethers } from 'ethers';
+import { deriveAddressFromPrivateKey } from './signer';
 
 // ---------- internal helpers ----------
 
@@ -109,16 +109,27 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   throw lastError;
 }
 
+/**
+ * Resolve the master EVM address used in REST URL paths
+ * (`/accounts/{userAddress}/...`).
+ *
+ * Per SoDEX docs:
+ *  - Testnet → the private key is the master wallet's key, so the derived
+ *    address equals the master address.
+ *  - Mainnet → the private key is the API key (agent) private key, which
+ *    derives to the agent address, NOT the master. The user MUST provide
+ *    the master `evmAddress` explicitly in Settings for URL paths to work.
+ *
+ * When both are available we prefer the explicit `evmAddress`, otherwise
+ * we fall back to the derived one. Returned value is lower-cased to
+ * ensure path matching is consistent.
+ */
 function getEvmAddress(): string {
-  const { privateKey } = useSettingsStore.getState();
-  if (!privateKey) return '';
-  try {
-    let pk = privateKey;
-    if (!pk.startsWith('0x')) pk = '0x' + pk;
-    return new ethers.Wallet(pk).address;
-  } catch {
-    return '';
-  }
+  const { privateKey, evmAddress } = useSettingsStore.getState();
+  const explicit = (evmAddress ?? '').trim();
+  if (explicit) return explicit.toLowerCase();
+  const derived = deriveAddressFromPrivateKey(privateKey);
+  return derived ? derived.toLowerCase() : '';
 }
 
 function getClient(market: 'spot' | 'perps') {
@@ -364,47 +375,54 @@ export async function fetchPerpsSymbolID(symbol: string): Promise<number | null>
 }
 
 /**
- * Attempt to extract accountID from a raw API response object.
- * NOTE: perpsClient/spotClient response interceptors already unwrap
- * axios `response.data`, so the value we receive from .get()/.post()
- * IS the JSON body itself.  The body may be:
+ * Attempt to extract the numeric account ID from a raw API response.
+ *
+ * NOTE: `perpsClient` / `spotClient` response interceptors already unwrap
+ * axios `response.data`, so the value we receive from `.get()`/`.post()`
+ * IS the JSON body itself. The body may be:
  *   Shape A (envelope): { code: 0, data: { aid: 123, ... } }
  *   Shape B (flat):     { aid: 123, balances: [...] }
- * We search both levels.
+ *
+ * We look for **explicit account-id keys only** — generic `id` is too
+ * ambiguous (symbol IDs, order IDs, trade IDs etc. all use the same name).
+ * Per schema, the canonical key is `aid` on `WsPerpsState` / `WsSpotState`.
  */
 function extractAccountIDDeep(raw: unknown): number | null {
   if (raw == null || typeof raw !== 'object') return null;
 
-  const searchKeys = ['aid', 'accountID', 'accountId', 'AccountID', 'account_id', 'id'];
+  const ACCOUNT_ID_KEYS = ['aid', 'accountID', 'accountId', 'AccountID', 'account_id'];
 
   const tryExtract = (obj: Record<string, unknown>): number | null => {
-    for (const key of searchKeys) {
+    for (const key of ACCOUNT_ID_KEYS) {
       const v = obj[key];
       if (v == null || v === '') continue;
       const n = Number(v);
-      // REASONING: Go backend `required` tag on uint64 fields often rejects 0.
-      // We look for a non-zero positive integer to ensure validation passes.
-      if (Number.isFinite(n) && n > 0) return n;
+      // Go `required` tag on uint64 fields rejects 0. Require a positive
+      // integer to ensure validation passes server-side.
+      if (Number.isFinite(n) && n > 0 && Number.isInteger(n)) return n;
     }
     return null;
   };
 
   const obj = raw as Record<string, unknown>;
 
-  // Try top-level
+  // Top-level (flat shape)
   const top = tryExtract(obj);
   if (top != null) return top;
 
-  // Try nested data envelope
-  if (obj.data && typeof obj.data === 'object') {
+  // Nested `data` envelope
+  if (obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data)) {
     const nested = tryExtract(obj.data as Record<string, unknown>);
     if (nested != null) return nested;
   }
 
-  // Recursive deep search
+  // Last-resort recursive search, but skip containers that typically hold
+  // other entities with conflicting id fields.
+  const SKIP_KEYS = new Set(['balances', 'positions', 'orders', 'trades', 'fundings']);
   for (const key of Object.keys(obj)) {
+    if (SKIP_KEYS.has(key)) continue;
     const val = obj[key];
-    if (val && typeof val === 'object' && !Array.isArray(val) && key !== 'balances' && key !== 'positions') {
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
       const deep = extractAccountIDDeep(val);
       if (deep != null) return deep;
     }
@@ -456,21 +474,11 @@ export async function fetchPerpsAccountState(): Promise<{ accountID: number; [ke
     }
   }
 
-  // --- Attempt 3: /orders (often includes accountID in response) ---
-  if (accountID == null) {
-    try {
-      const body = await withRetry(() => perpsClient.get(`/accounts/${address}/orders`));
-      // Debug: orders endpoint response
-      accountID = extractAccountIDDeep(body);
-    } catch (err) {
-      // Orders endpoint failed, will throw below
-    }
-  }
-
   if (accountID == null) {
     throw new Error(
       'No perps account found for this wallet. '
-      + 'Please create a perps account first via the Sodex UI or check your wallet connection.'
+      + 'Make sure the EVM Address in Settings points to a wallet that has a SoDEX '
+      + 'perps account on this network (mainnet and testnet account IDs are separate).'
     );
   }
 
@@ -654,11 +662,23 @@ export async function fetchPositions() {
   return Array.isArray(data) ? data : (data.positions ?? []);
 }
 
-export async function fetchOpenOrders(market: 'spot' | 'perps' = 'perps') {
+/**
+ * Fetch all open orders for the current wallet.
+ *
+ * Endpoint:
+ *  - Spot : `GET /accounts/{address}/orders[?symbol=...]`
+ *  - Perps: `GET /accounts/{address}/orders[?symbol=...]`
+ *
+ * `symbol` is optional per the REST docs; when supplied it filters the list
+ * server-side. We pass it through when non-empty to avoid pulling the full
+ * open-order book for accounts with lots of open orders.
+ */
+export async function fetchOpenOrders(market: 'spot' | 'perps' = 'perps', symbol?: string) {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const client = getClient(market);
-  const res = await withRetry(() => client.get(`/accounts/${address}/orders`));
+  const query = symbol ? { symbol: normalizeSymbol(symbol, market) } : undefined;
+  const res = await withRetry(() => client.get(`/accounts/${address}/orders`, { params: query }));
   // API returns { blockTime, blockHeight, orders: [...] } — unwrap the inner array.
   const data = res?.data ?? res ?? {};
   return Array.isArray(data) ? data : (data.orders ?? []);
@@ -692,8 +712,9 @@ async function placeSpotOrder(params: PlaceOrderParams): Promise<unknown> {
     fetchSymbolEntry(params.symbol, 'spot'),
   ]);
 
-  const symbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
-  if (symbolID == null) {
+  const rawSymbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
+  const symbolID = rawSymbolID != null ? Number(rawSymbolID) : null;
+  if (symbolID == null || !Number.isFinite(symbolID) || symbolID <= 0) {
     throw new Error(`placeSpotOrder: symbolID not found for symbol "${params.symbol}"`);
   }
 
@@ -735,7 +756,7 @@ async function placeSpotOrder(params: PlaceOrderParams): Promise<unknown> {
 
   // Build BatchNewOrderRequest in Go struct field order: accountID, orders
   const payload = {
-    accountID: accountState.accountID,
+    accountID: Number(accountState.accountID),
     orders: [orderItem],
   };
 
@@ -762,8 +783,9 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<unknown> {
     fetchSymbolEntry(params.symbol, 'perps'),
   ]);
 
-  const symbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
-  if (symbolID == null) {
+  const rawSymbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
+  const symbolID = rawSymbolID != null ? Number(rawSymbolID) : null;
+  if (symbolID == null || !Number.isFinite(symbolID) || symbolID <= 0) {
     throw new Error(`placePerpsOrder: symbolID not found for symbol "${params.symbol}"`);
   }
 
@@ -862,8 +884,9 @@ export async function placeBatchOrders(
       fetchSymbolEntry(symbol, 'spot'),
     ]);
 
-    const symbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
-    if (symbolID == null) {
+    const rawSymbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
+    const symbolID = rawSymbolID != null ? Number(rawSymbolID) : null;
+    if (symbolID == null || !Number.isFinite(symbolID) || symbolID <= 0) {
       throw new Error(`placeBatchOrders: symbolID not found for symbol "${symbol}"`);
     }
 
@@ -890,9 +913,8 @@ export async function placeBatchOrders(
       return orderItem;
     });
 
-    const aid = Number(accountState.accountID);
     const payload = {
-      accountID: aid,
+      accountID: Number(accountState.accountID),
       orders,
     };
 
@@ -907,8 +929,9 @@ export async function placeBatchOrders(
       fetchSymbolEntry(symbol, 'perps'),
     ]);
 
-    const symbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
-    if (symbolID == null) {
+    const rawSymbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
+    const symbolID = rawSymbolID != null ? Number(rawSymbolID) : null;
+    if (symbolID == null || !Number.isFinite(symbolID) || symbolID <= 0) {
       throw new Error(`placeBatchOrders: symbolID not found for symbol "${symbol}"`);
     }
 
@@ -937,11 +960,10 @@ export async function placeBatchOrders(
       return order;
     });
 
-    const aid = Number(accountState.accountID);
     const payload = {
-      accountID: aid,
-      symbolID: Number(symbolID),
-      orders: orders,
+      accountID: Number(accountState.accountID),
+      symbolID,
+      orders,
     };
 
     const res = await withRetry(() => perpsClient.post('/trade/orders', payload));
@@ -953,8 +975,14 @@ export async function placeBatchOrders(
 }
 
 /**
- * Update perps leverage/margin mode for a symbol.
- * marginMode: 1=ISOLATED, 2=CROSS
+ * Update perps leverage & margin mode for a symbol.
+ *
+ * Endpoint: `POST /trade/leverage` (see `sodex-rest-perps-api.md`).
+ * Field order follows `UpdateLeverageRequest` Go struct:
+ *   accountID, symbolID, leverage, marginMode.
+ * `marginMode`: 1 = ISOLATED, 2 = CROSS.
+ * Server rejects the request when the account has open orders or positions
+ * on the symbol.
  */
 export async function updatePerpsLeverage(
   symbol: string,
@@ -970,13 +998,48 @@ export async function updatePerpsLeverage(
   }
 
   const payload = {
-    accountID: accountState.accountID,
-    symbolID,
-    leverage,
+    accountID: Number(accountState.accountID),
+    symbolID: Number(symbolID),
+    leverage: Number(leverage),
     marginMode,
   };
 
   const res = await withRetry(() => perpsClient.post('/trade/leverage', payload));
+  const data = (res as { data?: unknown } | null)?.data ?? res ?? {};
+  assertNoBodyError(data);
+}
+
+/**
+ * Add or remove margin from an isolated perps position.
+ *
+ * Endpoint: `POST /trade/margin` (see `sodex-rest-perps-api.md`).
+ * Positive `amount` adds margin, negative removes margin.
+ * Field order follows `UpdateMarginRequest` Go struct:
+ *   accountID, symbolID, amount.
+ */
+export async function updatePerpsMargin(
+  symbol: string,
+  amount: string | number,
+): Promise<void> {
+  const [accountState, symbolID] = await Promise.all([
+    fetchPerpsAccountState(),
+    fetchPerpsSymbolID(symbol),
+  ]);
+  if (symbolID == null) {
+    throw new Error(`updatePerpsMargin: symbolID not found for "${symbol}"`);
+  }
+  const amountStr = typeof amount === 'number' ? amount.toString() : String(amount).trim();
+  if (!amountStr || amountStr === '0' || parseFloat(amountStr) === 0) {
+    throw new Error('updatePerpsMargin: amount must be non-zero');
+  }
+
+  const payload = {
+    accountID: Number(accountState.accountID),
+    symbolID: Number(symbolID),
+    amount: amountStr,
+  };
+
+  const res = await withRetry(() => perpsClient.post('/trade/margin', payload));
   const data = (res as { data?: unknown } | null)?.data ?? res ?? {};
   assertNoBodyError(data);
 }
@@ -990,17 +1053,20 @@ export async function cancelOrder(orderId: string, symbol: string, market: 'spot
     if (symbolID == null) throw new Error(`cancelOrder: symbolID not found for "${symbol}"`);
 
     // PerpsCancelItem in Go struct field order: symbolID, orderID(omitempty), clOrdID(omitempty)
-    const cancelItem: Record<string, unknown> = { symbolID };
+    // Per docs: provide EITHER orderID or clOrdID, not both.
+    const cancelItem: Record<string, unknown> = { symbolID: Number(symbolID) };
     const numericOrderId = parseOrderIdNumeric(orderId);
     if (orderId && !isNaN(numericOrderId)) {
       cancelItem.orderID = numericOrderId;
     } else if (orderId) {
       cancelItem.clOrdID = orderId;
+    } else {
+      throw new Error('cancelOrder: orderId or clOrdID is required');
     }
 
     // PerpsCancelOrderRequest in Go struct field order: accountID, cancels
     const payload = {
-      accountID: accountState.accountID,
+      accountID: Number(accountState.accountID),
       cancels: [cancelItem],
     };
 
@@ -1017,9 +1083,10 @@ export async function cancelOrder(orderId: string, symbol: string, market: 'spot
     if (symbolID == null) throw new Error(`cancelOrder: symbolID not found for "${symbol}"`);
 
     // BatchCancelOrderItem in Go struct field order:
-    // symbolID, clOrdID(required — new ID for this cancel request), orderID(omitempty), origClOrdID(omitempty)
+    // symbolID, clOrdID(required — new unique ID for this cancel request),
+    // orderID(omitempty), origClOrdID(omitempty)
     const cancelItem: Record<string, unknown> = {
-      symbolID,
+      symbolID: Number(symbolID),
       clOrdID: generateClOrdID(), // unique ID for this cancellation request
     };
     const numericOrderId = parseOrderIdNumeric(orderId);
@@ -1027,11 +1094,13 @@ export async function cancelOrder(orderId: string, symbol: string, market: 'spot
       cancelItem.orderID = numericOrderId;
     } else if (orderId) {
       cancelItem.origClOrdID = orderId; // treat string as original client order ID
+    } else {
+      throw new Error('cancelOrder: orderId or origClOrdID is required');
     }
 
     // BatchCancelOrderRequest in Go struct field order: accountID, cancels
     const payload = {
-      accountID: accountState.accountID,
+      accountID: Number(accountState.accountID),
       cancels: [cancelItem],
     };
 
@@ -1042,21 +1111,40 @@ export async function cancelOrder(orderId: string, symbol: string, market: 'spot
   }
 }
 
+/**
+ * Cancel every open order for the current account.
+ *
+ * - `symbol` optional: when provided, only orders for that symbol are cancelled.
+ *   We also pass the filter to the server-side `/accounts/{address}/orders` GET
+ *   endpoint to avoid paging through unrelated markets.
+ * - Cancellations are dispatched per-symbol through `batchCancelOrders` so each
+ *   symbol's orders go in a single signed request (lower rate-limit cost than
+ *   N round-trips).
+ */
 export async function cancelAllOrders(symbol?: string, market: 'spot' | 'perps' = 'perps') {
-  const orders = await fetchOpenOrders(market);
-  const results: unknown[] = [];
+  const orders = await fetchOpenOrders(market, symbol);
   const ordersArray = Array.isArray(orders) ? orders : [];
-  const normalizedFilter = symbol ? normalizeSymbol(symbol, market) : undefined;
+  if (ordersArray.length === 0) return [];
+
+  // Group by symbol so we can batch-cancel per-symbol.
+  const bySymbol = new Map<string, string[]>();
   for (const order of ordersArray) {
-    if (normalizedFilter && order.symbol !== normalizedFilter) continue;
-    // API returns orderID (uint64); fall back to orderId/id for backwards compat.
+    const sym = String(order.symbol ?? '');
+    if (!sym) continue;
     const orderId = String(order.orderID ?? order.orderId ?? order.id ?? '');
-    if (orderId === '') continue;
+    if (!orderId) continue;
+    const bucket = bySymbol.get(sym) ?? [];
+    bucket.push(orderId);
+    bySymbol.set(sym, bucket);
+  }
+
+  const results: unknown[] = [];
+  for (const [sym, ids] of bySymbol.entries()) {
     try {
-      const r = await cancelOrder(orderId, order.symbol, market);
+      const r = await batchCancelOrders(ids, sym, market);
       results.push(r);
     } catch (e) {
-      results.push({ error: e, orderId });
+      results.push({ error: e, symbol: sym, orderIds: ids });
     }
   }
   return results;
@@ -1242,9 +1330,21 @@ export async function fetchTargetAccountFills(
 
 
 /**
- * Build a cancel item for a given orderId, used by batch cancel.
+ * Build a single cancel item for the batch cancel endpoints.
+ *
+ * Field order mirrors the Go structs:
+ *  - `PerpsCancelItem`       : symbolID, orderID(omitempty), clOrdID(omitempty)
+ *  - `BatchCancelOrderItem`  : symbolID, clOrdID(required), orderID(omitempty),
+ *                              origClOrdID(omitempty)
+ *
+ * The spot flavour requires a unique `clOrdID` for each cancellation request;
+ * the perps flavour does not. `includeClOrdID=true` switches to the spot form.
  */
-function buildCancelItem(orderId: string, symbolID: number | string | null, includeClOrdID = false): Record<string, unknown> {
+function buildCancelItem(
+  orderId: string,
+  symbolID: number,
+  includeClOrdID = false,
+): Record<string, unknown> {
   const cancelItem: Record<string, unknown> = { symbolID };
   if (includeClOrdID) cancelItem.clOrdID = generateClOrdID();
   const numericOrderId = parseOrderIdNumeric(orderId);
@@ -1278,8 +1378,9 @@ export async function batchCancelOrders(
     ]);
     if (symbolID == null) throw new Error(`batchCancelOrders: symbolID not found for "${symbol}"`);
 
-    const cancels = orderIds.map((orderId) => buildCancelItem(orderId, symbolID));
-    const payload = { accountID: accountState.accountID, cancels };
+    const numericSymbolID = Number(symbolID);
+    const cancels = orderIds.map((orderId) => buildCancelItem(orderId, numericSymbolID));
+    const payload = { accountID: Number(accountState.accountID), cancels };
     const res = await withRetry(() => perpsClient.delete('/trade/orders', { data: payload }));
     const data = res?.data ?? res ?? {};
     assertNoBodyError(data);
@@ -1292,11 +1393,293 @@ export async function batchCancelOrders(
     ]);
     if (symbolID == null) throw new Error(`batchCancelOrders: symbolID not found for "${symbol}"`);
 
-    const cancels = orderIds.map((orderId) => buildCancelItem(orderId, symbolID, true));
-    const payload = { accountID: accountState.accountID, cancels };
+    const numericSymbolID = Number(symbolID);
+    const cancels = orderIds.map((orderId) => buildCancelItem(orderId, numericSymbolID, true));
+    const payload = { accountID: Number(accountState.accountID), cancels };
     const res = await withRetry(() => spotClient.delete('/trade/orders/batch', { data: payload }));
     const data = res?.data ?? res ?? {};
     assertNoBodyError(data);
     return data;
   }
+}
+
+// ---------- Replace / Modify / Schedule-Cancel ----------
+
+/**
+ * Request-side parameters for a single order replacement.
+ * Either `origOrderID` or `origClOrdID` must be supplied (but not both),
+ * and at least one of `price` / `quantity` must be provided.
+ */
+export interface ReplaceOrderParams {
+  symbol: string;
+  /** Decimal price as string or number. Omit to keep the original price. */
+  price?: string | number;
+  /** Decimal quantity as string or number. Omit to keep the original quantity. */
+  quantity?: string | number;
+  /** Numeric server-assigned order ID to replace. */
+  origOrderID?: string | number;
+  /** Client order ID of the order to replace. */
+  origClOrdID?: string;
+}
+
+/**
+ * Replace / amend one or more open limit GTC / GTX orders atomically.
+ *
+ * Endpoint:
+ *  - Spot : `POST /trade/orders/replace`
+ *  - Perps: `POST /trade/orders/replace`
+ *
+ * Field order follows `ReplaceOrderRequest` / `ReplaceParams` in the Go SDK:
+ *   ReplaceOrderRequest{ accountID, orders[] }
+ *   ReplaceParams{ symbolID, clOrdID, origOrderID?, origClOrdID?, price?, quantity? }
+ */
+export async function replaceOrders(
+  replacements: ReplaceOrderParams[],
+  market: 'spot' | 'perps',
+): Promise<unknown> {
+  if (replacements.length === 0) return {};
+
+  const [accountState] = await Promise.all([
+    market === 'perps' ? fetchPerpsAccountState() : fetchSpotAccountState(),
+  ]);
+
+  const orders: Record<string, unknown>[] = [];
+  for (const r of replacements) {
+    const symbolEntry = await fetchSymbolEntry(r.symbol, market);
+    const rawSymbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
+    const symbolID = rawSymbolID != null ? Number(rawSymbolID) : null;
+    if (symbolID == null || !Number.isFinite(symbolID) || symbolID <= 0) {
+      throw new Error(`replaceOrders: symbolID not found for "${r.symbol}"`);
+    }
+    if (!r.origOrderID && !r.origClOrdID) {
+      throw new Error('replaceOrders: origOrderID or origClOrdID is required');
+    }
+    if (r.origOrderID != null && r.origClOrdID) {
+      throw new Error('replaceOrders: provide either origOrderID or origClOrdID, not both');
+    }
+    if (r.price === undefined && r.quantity === undefined) {
+      throw new Error('replaceOrders: at least one of price or quantity must be provided');
+    }
+
+    const { pricePrecision, tickSize, quantityPrecision, stepSize } = extractPrecision(symbolEntry);
+
+    const item: Record<string, unknown> = {
+      symbolID,
+      clOrdID: generateClOrdID(),
+    };
+    if (r.origOrderID != null) {
+      const n = Number(r.origOrderID);
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new Error(`replaceOrders: invalid origOrderID "${r.origOrderID}"`);
+      }
+      item.origOrderID = n;
+    } else if (r.origClOrdID) {
+      item.origClOrdID = r.origClOrdID;
+    }
+    if (r.price !== undefined) {
+      const priceNum = typeof r.price === 'number' ? r.price : parseFloat(r.price);
+      if (!Number.isFinite(priceNum) || priceNum <= 0) {
+        throw new Error(`replaceOrders: invalid price "${r.price}"`);
+      }
+      item.price = roundToTick(priceNum, tickSize, pricePrecision);
+    }
+    if (r.quantity !== undefined) {
+      const qtyNum = typeof r.quantity === 'number' ? r.quantity : parseFloat(r.quantity);
+      if (!Number.isFinite(qtyNum) || qtyNum <= 0) {
+        throw new Error(`replaceOrders: invalid quantity "${r.quantity}"`);
+      }
+      // Treat replacement as a LIMIT order (only LIMIT GTC / GTX can be replaced).
+      item.quantity = normalizeOrderQuantity(qtyNum, 1, symbolEntry, quantityPrecision, stepSize);
+    }
+    orders.push(item);
+  }
+
+  const payload = {
+    accountID: Number(accountState.accountID),
+    orders,
+  };
+
+  const client = getClient(market);
+  const res = await withRetry(() => client.post('/trade/orders/replace', payload));
+  const data = res?.data ?? res ?? {};
+  assertNoBodyError(data);
+  return data;
+}
+
+/**
+ * Modify an existing perps TP/SL order in place.
+ *
+ * Endpoint: `POST /trade/orders/modify` (perps only).
+ * Field order follows `ModifyOrderRequest`:
+ *   accountID, symbolID, orderID?, clOrdID?, price?, quantity?, stopPrice?
+ *
+ * Provide either `orderID` OR `clOrdID`, and at least one of
+ * `price` / `quantity` / `stopPrice`.
+ */
+export async function modifyPerpsOrder(params: {
+  symbol: string;
+  orderID?: string | number;
+  clOrdID?: string;
+  price?: string | number;
+  quantity?: string | number;
+  stopPrice?: string | number;
+}): Promise<unknown> {
+  const [accountState, symbolEntry] = await Promise.all([
+    fetchPerpsAccountState(),
+    fetchSymbolEntry(params.symbol, 'perps'),
+  ]);
+  const rawSymbolID = symbolEntry?.symbolID ?? symbolEntry?.id ?? symbolEntry?.symbolId ?? null;
+  const symbolID = rawSymbolID != null ? Number(rawSymbolID) : null;
+  if (symbolID == null || !Number.isFinite(symbolID) || symbolID <= 0) {
+    throw new Error(`modifyPerpsOrder: symbolID not found for "${params.symbol}"`);
+  }
+  if (params.orderID == null && !params.clOrdID) {
+    throw new Error('modifyPerpsOrder: orderID or clOrdID is required');
+  }
+  if (params.orderID != null && params.clOrdID) {
+    throw new Error('modifyPerpsOrder: provide either orderID or clOrdID, not both');
+  }
+  if (params.price === undefined && params.quantity === undefined && params.stopPrice === undefined) {
+    throw new Error('modifyPerpsOrder: at least one of price, quantity, or stopPrice must be provided');
+  }
+
+  const { pricePrecision, tickSize, quantityPrecision, stepSize } = extractPrecision(symbolEntry);
+
+  // Build ModifyOrderRequest in Go struct field order
+  const payload: Record<string, unknown> = {
+    accountID: Number(accountState.accountID),
+    symbolID,
+  };
+  if (params.orderID != null) {
+    const n = Number(params.orderID);
+    if (!Number.isFinite(n) || n <= 0) {
+      throw new Error(`modifyPerpsOrder: invalid orderID "${params.orderID}"`);
+    }
+    payload.orderID = n;
+  } else if (params.clOrdID) {
+    payload.clOrdID = params.clOrdID;
+  }
+  if (params.price !== undefined) {
+    const priceNum = typeof params.price === 'number' ? params.price : parseFloat(params.price);
+    if (!Number.isFinite(priceNum) || priceNum <= 0) {
+      throw new Error(`modifyPerpsOrder: invalid price "${params.price}"`);
+    }
+    payload.price = roundToTick(priceNum, tickSize, pricePrecision);
+  }
+  if (params.quantity !== undefined) {
+    const qtyNum = typeof params.quantity === 'number' ? params.quantity : parseFloat(params.quantity);
+    if (!Number.isFinite(qtyNum) || qtyNum <= 0) {
+      throw new Error(`modifyPerpsOrder: invalid quantity "${params.quantity}"`);
+    }
+    payload.quantity = normalizeOrderQuantity(qtyNum, 1, symbolEntry, quantityPrecision, stepSize);
+  }
+  if (params.stopPrice !== undefined) {
+    const stopNum = typeof params.stopPrice === 'number' ? params.stopPrice : parseFloat(params.stopPrice);
+    if (!Number.isFinite(stopNum) || stopNum <= 0) {
+      throw new Error(`modifyPerpsOrder: invalid stopPrice "${params.stopPrice}"`);
+    }
+    payload.stopPrice = roundToTick(stopNum, tickSize, pricePrecision);
+  }
+
+  const res = await withRetry(() => perpsClient.post('/trade/orders/modify', payload));
+  const data = res?.data ?? res ?? {};
+  assertNoBodyError(data);
+  return data;
+}
+
+/**
+ * Schedule (or clear) a "Dead Man's Switch" auto-cancel-all for the current
+ * account.
+ *
+ * Endpoint:
+ *  - Spot : `POST /trade/orders/schedule-cancel`
+ *  - Perps: `POST /trade/orders/schedule-cancel`
+ *
+ * Field order follows `ScheduleCancelRequest`:
+ *   accountID, scheduledTimestamp(omitempty).
+ *
+ * - Pass `scheduledTimestamp` as a Unix millisecond timestamp at least
+ *   5 seconds in the future to arm the switch.
+ * - Omit `scheduledTimestamp` (leave `undefined`) to clear any scheduled
+ *   cancellation.
+ */
+export async function scheduleCancelAll(
+  market: 'spot' | 'perps',
+  scheduledTimestamp?: number,
+): Promise<unknown> {
+  const accountState = market === 'perps'
+    ? await fetchPerpsAccountState()
+    : await fetchSpotAccountState();
+
+  const payload: Record<string, unknown> = {
+    accountID: Number(accountState.accountID),
+  };
+  if (scheduledTimestamp != null) {
+    if (!Number.isFinite(scheduledTimestamp) || scheduledTimestamp <= 0) {
+      throw new Error(`scheduleCancelAll: invalid scheduledTimestamp "${scheduledTimestamp}"`);
+    }
+    const now = Date.now();
+    if (scheduledTimestamp < now + 5_000) {
+      throw new Error('scheduleCancelAll: scheduledTimestamp must be at least 5 seconds in the future');
+    }
+    payload.scheduledTimestamp = Math.floor(scheduledTimestamp);
+  }
+
+  const client = getClient(market);
+  const res = await withRetry(() => client.post('/trade/orders/schedule-cancel', payload));
+  const data = res?.data ?? res ?? {};
+  assertNoBodyError(data);
+  return data;
+}
+
+// ---------- Historical Orders / Positions ----------
+
+/**
+ * Fetch historical orders (filled / canceled / expired) for the current
+ * account. Endpoint: `GET /accounts/{address}/orders/history`.
+ */
+export async function fetchOrderHistory(
+  market: 'spot' | 'perps' = 'perps',
+  params: {
+    symbol?: string;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+  } = {},
+): Promise<unknown[]> {
+  const address = getEvmAddress();
+  if (!address) throw new Error('No wallet configured');
+  const client = getClient(market);
+  const query: Record<string, unknown> = {};
+  if (params.symbol) query.symbol = normalizeSymbol(params.symbol, market);
+  if (params.startTime) query.startTime = params.startTime;
+  if (params.endTime) query.endTime = params.endTime;
+  if (params.limit) query.limit = params.limit;
+  const res = await withRetry(() => client.get(`/accounts/${address}/orders/history`, { params: query }));
+  const data = res?.data ?? res ?? {};
+  return Array.isArray(data) ? data : (data.orders ?? []);
+}
+
+/**
+ * Fetch closed / historical positions for the current perps account.
+ * Endpoint: `GET /accounts/{address}/positions/history`.
+ */
+export async function fetchPositionHistory(
+  params: {
+    symbol?: string;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+  } = {},
+): Promise<unknown[]> {
+  const address = getEvmAddress();
+  if (!address) throw new Error('No wallet configured');
+  const query: Record<string, unknown> = {};
+  if (params.symbol) query.symbol = normalizeSymbol(params.symbol, 'perps');
+  if (params.startTime) query.startTime = params.startTime;
+  if (params.endTime) query.endTime = params.endTime;
+  if (params.limit) query.limit = params.limit;
+  const res = await withRetry(() => perpsClient.get(`/accounts/${address}/positions/history`, { params: query }));
+  const data = res?.data ?? res ?? {};
+  return Array.isArray(data) ? data : (data.positions ?? []);
 }

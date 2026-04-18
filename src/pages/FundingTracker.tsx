@@ -59,8 +59,10 @@ function getFundingHeatColor(rate: number): string {
 }
 
 export const FundingTracker: React.FC = () => {
-  const { apiKeyName, privateKey } = useSettingsStore();
-  const hasKeys = !!(apiKeyName && privateKey);
+  const { privateKey } = useSettingsStore();
+  // A private key is sufficient for account endpoints — the master address
+  // and API key name are handled inside the API layer per network.
+  const hasKeys = !!privateKey;
 
   const [rows, setRows] = useState<FundingRow[]>([]);
   const [personalRows, setPersonalRows] = useState<PersonalFundingRow[]>([]);

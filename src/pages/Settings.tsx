@@ -1,11 +1,12 @@
 import React, { useState, useMemo } from 'react';
 import { useSettingsStore } from '../store/settingsStore';
-import { spotClient } from '../api/spotClient';
+import { perpsClient } from '../api/perpsClient';
 import { wsService } from '../api/websocket';
 import { clearServiceCaches } from '../api/services';
+import { deriveAddressFromPrivateKey } from '../api/signer';
 import toast from 'react-hot-toast';
 import { ethers } from 'ethers';
-import { Key, Shield, Settings2, Info, Wifi, Unplug, Globe, Bell, Hash, Zap, FlaskConical, Sun } from 'lucide-react';
+import { Key, Shield, Settings2, Info, Wifi, Unplug, Globe, Bell, Hash, Zap, FlaskConical, Sun, Wallet } from 'lucide-react';
 import { Card } from '../components/common/Card';
 import { Input } from '../components/common/Input';
 import { Toggle } from '../components/common/Input';
@@ -21,32 +22,45 @@ const TABS = [
 export const Settings: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'api' | 'preferences' | 'about'>('api');
   const store = useSettingsStore();
+  const [testing, setTesting] = useState(false);
 
-  const evmAddress = useMemo(() => {
-    try {
-      if (store.privateKey && store.privateKey.length >= 64) {
-        let pk = store.privateKey;
-        if (!pk.startsWith('0x')) pk = '0x' + pk;
-        const wallet = new ethers.Wallet(pk);
-        return wallet.address;
-      }
-    } catch {
-      return '';
-    }
-    return '';
-  }, [store.privateKey]);
+  // Derive the address that corresponds to the configured private key.
+  // On testnet this IS the master wallet. On mainnet this is the agent /
+  // API-key wallet, which is why we also expose a dedicated Master EVM
+  // Address field below.
+  const derivedAddress = useMemo(() => deriveAddressFromPrivateKey(store.privateKey), [store.privateKey]);
+
+  // The address we will actually put in REST URL paths (balances / orders /
+  // positions / state). Prefer the explicit `evmAddress`; fall back to the
+  // derived address so testnet users still get a sensible default.
+  const effectiveAddress = useMemo(() => {
+    const explicit = (store.evmAddress ?? '').trim();
+    if (explicit && ethers.isAddress(explicit)) return explicit;
+    return derivedAddress;
+  }, [store.evmAddress, derivedAddress]);
+
+  const evmAddressLooksValid = !store.evmAddress || ethers.isAddress(store.evmAddress.trim());
 
   const handleTestConnection = async () => {
-    if (!evmAddress) {
-      toast.error('Enter a valid Private Key.');
+    if (!effectiveAddress) {
+      toast.error('Enter a valid Private Key or Master EVM Address.');
       return;
     }
+    setTesting(true);
     try {
-      await spotClient.get(`/accounts/${evmAddress}/balances`);
-      toast.success('Connection successful!');
+      // Use the perps /state endpoint — it returns `aid` (accountID) and
+      // validates that the address actually has a SoDEX account on the
+      // current network. Public GETs are unsigned so we don't need a key.
+      await perpsClient.get(`/accounts/${effectiveAddress}/state`);
+      toast.success(`Connection successful (${store.isTestnet ? 'testnet' : 'mainnet'}).`);
     } catch (error: unknown) {
-      const e = error as { response?: { data?: { message?: string } } };
-      toast.error(e?.response?.data?.message || 'Connection failed.');
+      const e = error as { response?: { data?: { error?: string; message?: string } } };
+      const msg = e?.response?.data?.error
+        ?? e?.response?.data?.message
+        ?? (error instanceof Error ? error.message : 'Connection failed.');
+      toast.error(msg);
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -84,30 +98,62 @@ export const Settings: React.FC = () => {
 
                 <form onSubmit={(e) => e.preventDefault()} className="space-y-4">
                   <Input
-                    label="API Key (EVM Address)"
+                    label={store.isTestnet ? 'API Key Name (Mainnet only — ignored on Testnet)' : 'API Key Name (X-API-Key)'}
                     type="text"
                     value={store.apiKeyName}
                     onChange={(e) => store.setApiKeyName(e.target.value)}
-                    placeholder="0x... (optional, defaults to derived address)"
+                    placeholder={store.isTestnet ? 'Not required on testnet' : 'Name chosen when creating the API key'}
                     icon={<Key size={14} />}
-                    hint="SoDEX expects X-API-Key as an EVM address. If empty or invalid, derived address from private key is used."
+                    hint="Mainnet: the name (typically EVM address) of the SoDEX API key you registered — sent as `X-API-Key` on every signed request. Testnet: ignored; the derived address of the private key below is used instead."
+                    disabled={store.isTestnet}
                   />
 
                   <Input
-                    label="Private Key (Local Only)"
+                    label={store.isTestnet ? 'Private Key (Master Wallet — Testnet)' : 'Private Key (API Key private key — NOT master wallet)'}
                     type="password"
                     value={store.privateKey}
                     onChange={(e) => store.setPrivateKey(e.target.value)}
                     placeholder="0x..."
-                    hint="Your key is stored only in your browser and never sent to any server."
+                    hint={
+                      store.isTestnet
+                        ? 'Testnet: paste your master EVM wallet private key here — requests are signed with it directly. Stored only in memory, never persisted.'
+                        : 'Mainnet: paste the API key\'s private key (from the keypair you were given when creating the API key), NOT your master wallet key. Stored only in memory, never persisted.'
+                    }
                   />
+
+                  <Input
+                    label="Master EVM Address (used in REST URL paths)"
+                    type="text"
+                    value={store.evmAddress}
+                    onChange={(e) => store.setEvmAddress(e.target.value)}
+                    placeholder={store.isTestnet ? 'Optional — defaults to derived address' : '0x... (required on Mainnet)'}
+                    icon={<Wallet size={14} />}
+                    hint="Your master wallet address, the one connected to SoDEX. Used in URL paths like /accounts/{address}/state. On Testnet this defaults to the derived address. On Mainnet it MUST be set because the private key belongs to the API agent wallet, not the master."
+                  />
+                  {!evmAddressLooksValid && (
+                    <p className="text-[10px] text-danger">Invalid EVM address format.</p>
+                  )}
 
                   <div className="space-y-1.5">
                     <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">
-                      Derived EVM Address
+                      Derived address (from private key)
                     </label>
                     <div className="w-full bg-background/60 border border-border rounded-lg px-3 py-2.5 text-sm text-text-muted font-mono truncate">
-                      {evmAddress || 'Will appear once a valid private key is entered...'}
+                      {derivedAddress || 'Will appear once a valid private key is entered...'}
+                    </div>
+                    {!store.isTestnet && derivedAddress && store.evmAddress && store.evmAddress.toLowerCase() !== derivedAddress.toLowerCase() && (
+                      <p className="text-[10px] text-text-muted">
+                        Mainnet: derived address (API agent) differs from master EVM address — this is expected.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider">
+                      Effective URL address (used in GETs)
+                    </label>
+                    <div className="w-full bg-background/60 border border-border rounded-lg px-3 py-2.5 text-sm text-text-primary font-mono truncate">
+                      {effectiveAddress || '—'}
                     </div>
                   </div>
                 </form>
@@ -196,7 +242,9 @@ export const Settings: React.FC = () => {
                   <div className="mt-3 flex items-start gap-2 p-3 bg-warning/5 border border-warning/20 rounded-lg">
                     <Info size={14} className="text-warning shrink-0 mt-0.5" />
                     <p className="text-xs text-warning leading-relaxed">
-                      You are in Mainnet mode. Real assets will be used in transactions.
+                      Mainnet: real assets are used. Sign requests with your API key's private
+                      key (not the master wallet key) and put your master wallet address in the
+                      EVM Address field. Mainnet and Testnet account IDs are distinct.
                     </p>
                   </div>
                 )}
@@ -205,9 +253,10 @@ export const Settings: React.FC = () => {
                   <div className="mt-3 flex items-start gap-2 p-3 bg-primary/5 border border-primary/20 rounded-lg">
                     <Info size={14} className="text-primary shrink-0 mt-0.5" />
                     <p className="text-xs text-primary leading-relaxed">
-                      Testnet mode: requests are signed directly with your private key, and your
-                      derived EVM address is used as the X-API-Key. Registered API keys only work
-                      on Mainnet, and your Mainnet accountID is different from your Testnet accountID.
+                      Testnet mode: registered API keys do not work here. Sign with the master
+                      wallet's private key; its derived address is used as the `X-API-Key`.
+                      Mainnet and Testnet account IDs are different — make sure you are using
+                      the right one for the network you are hitting.
                     </p>
                   </div>
                 )}
@@ -218,6 +267,8 @@ export const Settings: React.FC = () => {
                   variant="outline"
                   icon={<Wifi size={14} />}
                   onClick={handleTestConnection}
+                  loading={testing}
+                  disabled={testing || !effectiveAddress}
                 >
                   Test Connection
                 </Button>

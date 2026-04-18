@@ -66,7 +66,7 @@ async function analyzeSentimentWithRetry(title: string): Promise<'BULLISH' | 'BE
 }
 
 export const NewsBot: React.FC = () => {
-  const { sosoApiKey, privateKey, apiKeyName, geminiApiKey } = useSettingsStore();
+  const { sosoApiKey, privateKey, geminiApiKey } = useSettingsStore();
 
   const [running, setRunning] = useState(false);
   const [useAi, setUseAi] = useState(false);
@@ -115,7 +115,7 @@ export const NewsBot: React.FC = () => {
     const title = getNewsTitle(item);
     addLog('trade', `🔔 Trigger: "${rule.keyword}" → ${rule.side} ${quantity} ${symbol}`);
     try {
-      if (!privateKey || !apiKeyName) {
+      if (!privateKey) {
         addLog('error', 'No wallet configured — set Private Key in Settings');
         return;
       }
@@ -130,7 +130,7 @@ export const NewsBot: React.FC = () => {
       addLog('error', `❌ Order failed: ${msg}`);
       toast.error(`News Bot: ${msg}`);
     }
-  }, [symbol, quantity, market, privateKey, apiKeyName, addLog]);
+  }, [symbol, quantity, market, privateKey, addLog]);
 
   const poll = useCallback(async () => {
     if (!runningRef.current) return;

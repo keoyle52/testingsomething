@@ -22,7 +22,10 @@ export const Topbar: React.FC = () => {
   const location = useLocation();
   const title = PAGE_TITLES[location.pathname] ?? 'Terminal';
   const store = useSettingsStore();
-  const isConnected = !!store.apiKeyName;
+  // A private key is the minimum required to sign requests. On mainnet a
+  // separate master `evmAddress` is also needed for URL paths, but its
+  // absence is surfaced as a more specific error inside Settings / API.
+  const isConnected = !!store.privateKey;
   const isLight = store.theme === 'light';
 
   return (

@@ -29,8 +29,12 @@ interface TickerRow {
 }
 
 export const Dashboard: React.FC = () => {
-  const { apiKeyName, privateKey, defaultSymbol, isTestnet, isDemoMode } = useSettingsStore();
-  const hasKeys = !!(apiKeyName && privateKey);
+  const { privateKey, defaultSymbol, isTestnet, isDemoMode } = useSettingsStore();
+  // A private key is sufficient to authenticate account endpoints:
+  //  - Testnet: the key IS the master wallet.
+  //  - Mainnet: the key is the API-key private key; the master EVM address
+  //    is supplied separately through the Settings form.
+  const hasKeys = !!privateKey;
 
   const [balance, setBalance] = useState(0);
   const [positionsCount, setPositionsCount] = useState(0);
