@@ -9,28 +9,15 @@ const BASE_URL_TESTNET = 'https://testnet-gw.sodex.dev/api/v1/spot';
 export const spotClient = axios.create({ timeout: 15_000 });
 
 function resolveApiKeyAddress(apiKeyName: string, privateKey: string): string {
-  const raw = (apiKeyName ?? '').trim();
-  if (raw && /^0x[a-fA-F0-9]{40}$/.test(raw)) return raw;
+  const raw = (apiKeyName ?? '').trim().toLowerCase();
+  if (raw && /^0x[a-f0-9]{40}$/.test(raw)) return raw;
   try {
     if (!privateKey) return raw;
     const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
-    return new ethers.Wallet(pk).address;
+    return new ethers.Wallet(pk).address.toLowerCase();
   } catch {
     return raw;
   }
-}
-
-// Helper to find account ID in ANY case variation
-function findAccountID(payload: Record<string, unknown>): number | null {
-  const keys = ['accountID', 'accountId', 'AccountID', 'account_id', 'aid', 'id'];
-  for (const k of keys) {
-    const v = payload[k];
-    if (v != null) {
-      const n = Number(v);
-      if (Number.isFinite(n)) return n;
-    }
-  }
-  return null;
 }
 
 spotClient.interceptors.request.use(async (config) => {
@@ -45,16 +32,6 @@ spotClient.interceptors.request.use(async (config) => {
   // Only sign write (non-GET) requests
   if (method !== 'GET' && apiKeyAddress && privateKey) {
     const payload = config.data || {};
-
-    // ── NUCLEAR GUARD: accountID aliases ──
-    const aid = findAccountID(payload);
-    if (aid !== null) {
-      payload.accountID = aid;
-      payload.accountId = aid;
-      payload.AccountID = aid;
-      payload.aid = aid;
-      config.data = payload;
-    }
 
     const actionType = deriveActionType(method, config.url ?? '');
     try {

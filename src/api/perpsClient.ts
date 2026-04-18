@@ -9,12 +9,12 @@ const BASE_URL_TESTNET = 'https://testnet-gw.sodex.dev/api/v1/perps';
 export const perpsClient = axios.create({ timeout: 15_000 });
 
 function resolveApiKeyAddress(apiKeyName: string, privateKey: string): string {
-  const raw = (apiKeyName ?? '').trim();
-  if (raw && /^0x[a-fA-F0-9]{40}$/.test(raw)) return raw;
+  const raw = (apiKeyName ?? '').trim().toLowerCase();
+  if (raw && /^0x[a-f0-9]{40}$/.test(raw)) return raw;
   try {
     if (!privateKey) return raw;
     const pk = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
-    return new ethers.Wallet(pk).address;
+    return new ethers.Wallet(pk).address.toLowerCase();
   } catch {
     return raw;
   }
