@@ -449,8 +449,8 @@ export async function fetchPerpsAccountState(): Promise<{ accountID: number; [ke
 
   if (accountID == null) {
     throw new Error(
-      'fetchPerpsAccountState: accountID not found in any endpoint response. '
-      + 'Check browser console for raw API responses.'
+      'No perps account found for this wallet. '
+      + 'Please create a perps account first via the Sodex UI or check your wallet connection.'
     );
   }
 
