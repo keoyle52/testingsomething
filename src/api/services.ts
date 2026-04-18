@@ -346,31 +346,38 @@ export async function fetchPerpsSymbolID(symbol: string): Promise<number | null>
 
 /**
  * Attempt to extract accountID from a raw API response object.
- * SoDEX /state returns a nested structure: { code, data: { aid, ... } }
- * where `aid` is the Go-serialized short-form of accountID.
- * We also handle flat shapes and various camelCase/snake_case aliases.
+ * NOTE: perpsClient/spotClient response interceptors already unwrap
+ * axios `response.data`, so the value we receive from .get()/.post()
+ * IS the JSON body itself.  The body may be:
+ *   Shape A (envelope): { code: 0, data: { aid: 123, ... } }
+ *   Shape B (flat):     { aid: 123, balances: [...] }
+ * We search both levels.
  */
-function extractAccountIDDeep(raw: unknown): number | string | null {
+function extractAccountIDDeep(raw: unknown): number | null {
   if (raw == null || typeof raw !== 'object') return null;
+
+  const searchKeys = ['aid', 'accountID', 'accountId', 'account_id'];
+
+  const tryExtract = (obj: Record<string, unknown>): number | null => {
+    for (const key of searchKeys) {
+      const v = obj[key];
+      if (v == null) continue;
+      const n = Number(v);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+
   const obj = raw as Record<string, unknown>;
 
-  // Try top-level first (flat response or already-unwrapped)
-  for (const key of ['aid', 'accountID', 'accountId', 'account_id']) {
-    const v = obj[key];
-    if (v != null && v !== '' && v !== 0) return v as number | string;
-    // Allow 0 only if it's explicitly a number (primary account = 0 is valid on some exchanges)
-    if (typeof v === 'number') return v;
-  }
+  // Try top-level
+  const top = tryExtract(obj);
+  if (top != null) return top;
 
   // Try nested data envelope
-  const nested = obj.data;
-  if (nested && typeof nested === 'object') {
-    const n = nested as Record<string, unknown>;
-    for (const key of ['aid', 'accountID', 'accountId', 'account_id']) {
-      const v = n[key];
-      if (v != null && v !== '') return v as number | string;
-      if (typeof v === 'number') return v;
-    }
+  if (obj.data && typeof obj.data === 'object') {
+    const nested = tryExtract(obj.data as Record<string, unknown>);
+    if (nested != null) return nested;
   }
 
   return null;
@@ -379,47 +386,64 @@ function extractAccountIDDeep(raw: unknown): number | string | null {
 /**
  * Fetch the perps account state for the current wallet.
  * Primary: /state endpoint (returns WsPerpsState with `aid` = Account ID).
- * Fallback: /balances endpoint (returns accountID in the envelope).
+ * Fallback: /balances endpoint.
+ * IMPORTANT: perpsClient response interceptor already unwraps response.data,
+ * so the result of .get() IS the JSON body — do NOT access .data again.
  * Results are cached for ACCOUNT_STATE_CACHE_TTL ms.
  */
-export async function fetchPerpsAccountState(): Promise<{ accountID: number | string; [key: string]: unknown }> {
+export async function fetchPerpsAccountState(): Promise<{ accountID: number; [key: string]: unknown }> {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const cacheKey = `perps:${address}`;
   const cached = _accountStateCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < ACCOUNT_STATE_CACHE_TTL) return cached.state;
+  if (cached && Date.now() - cached.ts < ACCOUNT_STATE_CACHE_TTL) return cached.state as { accountID: number; [key: string]: unknown };
 
-  let accountID: number | string | null = null;
+  let accountID: number | null = null;
   let parsed: Record<string, unknown> = {};
 
+  // --- Attempt 1: /state ---
   try {
-    const stateRes = await withRetry(() => perpsClient.get(`/accounts/${address}/state`));
-    const stateData = stateRes?.data ?? stateRes ?? {};
-    console.log('[fetchPerpsAccountState] raw response:', JSON.stringify(stateData).slice(0, 500));
-    assertNoBodyError(stateData);
-    accountID = extractAccountIDDeep(stateData);
-    parsed = unwrapEnvelopeData(stateData);
+    // perpsClient interceptor returns response.data, so body IS the resolved value
+    const body = await withRetry(() => perpsClient.get(`/accounts/${address}/state`));
+    console.log('[fetchPerpsAccountState] /state body:', JSON.stringify(body).slice(0, 500));
+    assertNoBodyError(body);
+    accountID = extractAccountIDDeep(body);
+    parsed = unwrapEnvelopeData(body);
   } catch (err) {
-    console.warn('[fetchPerpsAccountState] /state failed, trying /balances fallback:', err);
+    console.warn('[fetchPerpsAccountState] /state failed:', err);
   }
 
-  // Fallback: /balances may return accountID in its envelope
+  // --- Attempt 2: /balances ---
   if (accountID == null) {
     try {
-      const balRes = await withRetry(() => perpsClient.get(`/accounts/${address}/balances`));
-      const balData = balRes?.data ?? balRes ?? {};
-      console.log('[fetchPerpsAccountState] /balances response:', JSON.stringify(balData).slice(0, 300));
-      accountID = extractAccountIDDeep(balData);
-      if (parsed && Object.keys(parsed).length === 0) parsed = unwrapEnvelopeData(balData);
-    } catch (balErr) {
-      console.warn('[fetchPerpsAccountState] /balances fallback also failed:', balErr);
+      const body = await withRetry(() => perpsClient.get(`/accounts/${address}/balances`));
+      console.log('[fetchPerpsAccountState] /balances body:', JSON.stringify(body).slice(0, 500));
+      accountID = extractAccountIDDeep(body);
+      if (Object.keys(parsed).length === 0) parsed = unwrapEnvelopeData(body);
+    } catch (err) {
+      console.warn('[fetchPerpsAccountState] /balances also failed:', err);
+    }
+  }
+
+  // --- Attempt 3: /orders (often includes accountID in response) ---
+  if (accountID == null) {
+    try {
+      const body = await withRetry(() => perpsClient.get(`/accounts/${address}/orders`));
+      console.log('[fetchPerpsAccountState] /orders body:', JSON.stringify(body).slice(0, 500));
+      accountID = extractAccountIDDeep(body);
+    } catch (err) {
+      console.warn('[fetchPerpsAccountState] /orders also failed:', err);
     }
   }
 
   if (accountID == null) {
-    throw new Error('fetchPerpsAccountState: accountID not found in /state or /balances response. Check console for raw responses.');
+    throw new Error(
+      'fetchPerpsAccountState: accountID not found in any endpoint response. '
+      + 'Check browser console for raw API responses.'
+    );
   }
 
+  console.log('[fetchPerpsAccountState] ✓ resolved accountID =', accountID, typeof accountID);
   const state = { ...parsed, accountID };
   _accountStateCache.set(cacheKey, { state, ts: Date.now() });
   return state;
@@ -427,47 +451,44 @@ export async function fetchPerpsAccountState(): Promise<{ accountID: number | st
 
 /**
  * Fetch the spot account state for the current wallet.
- * Primary: /state endpoint (returns WsSpotState with `aid` = Account ID).
- * Fallback: /balances endpoint.
- * Results are cached for ACCOUNT_STATE_CACHE_TTL ms.
+ * Same pattern as perps: interceptor already unwraps response.data.
  */
-export async function fetchSpotAccountState(): Promise<{ accountID: number | string; [key: string]: unknown }> {
+export async function fetchSpotAccountState(): Promise<{ accountID: number; [key: string]: unknown }> {
   const address = getEvmAddress();
   if (!address) throw new Error('No wallet configured');
   const cacheKey = `spot:${address}`;
   const cached = _accountStateCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < ACCOUNT_STATE_CACHE_TTL) return cached.state;
+  if (cached && Date.now() - cached.ts < ACCOUNT_STATE_CACHE_TTL) return cached.state as { accountID: number; [key: string]: unknown };
 
-  let accountID: number | string | null = null;
+  let accountID: number | null = null;
   let parsed: Record<string, unknown> = {};
 
   try {
-    const stateRes = await withRetry(() => spotClient.get(`/accounts/${address}/state`));
-    const stateData = stateRes?.data ?? stateRes ?? {};
-    console.log('[fetchSpotAccountState] raw response:', JSON.stringify(stateData).slice(0, 500));
-    assertNoBodyError(stateData);
-    accountID = extractAccountIDDeep(stateData);
-    parsed = unwrapEnvelopeData(stateData);
+    const body = await withRetry(() => spotClient.get(`/accounts/${address}/state`));
+    console.log('[fetchSpotAccountState] /state body:', JSON.stringify(body).slice(0, 500));
+    assertNoBodyError(body);
+    accountID = extractAccountIDDeep(body);
+    parsed = unwrapEnvelopeData(body);
   } catch (err) {
-    console.warn('[fetchSpotAccountState] /state failed, trying /balances fallback:', err);
+    console.warn('[fetchSpotAccountState] /state failed:', err);
   }
 
   if (accountID == null) {
     try {
-      const balRes = await withRetry(() => spotClient.get(`/accounts/${address}/balances`));
-      const balData = balRes?.data ?? balRes ?? {};
-      console.log('[fetchSpotAccountState] /balances response:', JSON.stringify(balData).slice(0, 300));
-      accountID = extractAccountIDDeep(balData);
-      if (parsed && Object.keys(parsed).length === 0) parsed = unwrapEnvelopeData(balData);
-    } catch (balErr) {
-      console.warn('[fetchSpotAccountState] /balances fallback also failed:', balErr);
+      const body = await withRetry(() => spotClient.get(`/accounts/${address}/balances`));
+      console.log('[fetchSpotAccountState] /balances body:', JSON.stringify(body).slice(0, 500));
+      accountID = extractAccountIDDeep(body);
+      if (Object.keys(parsed).length === 0) parsed = unwrapEnvelopeData(body);
+    } catch (err) {
+      console.warn('[fetchSpotAccountState] /balances also failed:', err);
     }
   }
 
   if (accountID == null) {
-    throw new Error('fetchSpotAccountState: accountID not found in /state or /balances response. Check console for raw responses.');
+    throw new Error('fetchSpotAccountState: accountID not found. Check browser console.');
   }
 
+  console.log('[fetchSpotAccountState] ✓ resolved accountID =', accountID, typeof accountID);
   const state = { ...parsed, accountID };
   _accountStateCache.set(cacheKey, { state, ts: Date.now() });
   return state;
@@ -754,11 +775,19 @@ async function placePerpsOrder(params: PlaceOrderParams): Promise<unknown> {
   order.positionSide = 1; // BOTH = 1
 
   // Build PerpsNewOrderRequest in Go struct field order: accountID, symbolID, orders
+  // CRITICAL: accountID MUST be a number (Go expects uint64), never a string
+  const numericAccountID = Number(accountState.accountID);
+  if (!Number.isFinite(numericAccountID)) {
+    throw new Error(`placePerpsOrder: invalid accountID "${accountState.accountID}" (type: ${typeof accountState.accountID})`);
+  }
+
   const payload = {
-    accountID: accountState.accountID,
-    symbolID,
+    accountID: numericAccountID,
+    symbolID: Number(symbolID),
     orders: [order],
   };
+
+  console.log('[placePerpsOrder] >>> PAYLOAD:', JSON.stringify(payload));
 
   let data: unknown;
   try {
