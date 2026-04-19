@@ -104,6 +104,7 @@ export const usePredictorStore = create<PredictorState>()(
       addHistoryEntry: (entry) =>
         set((s) => ({
           history: [entry, ...s.history].slice(0, 100),
+          skipped: entry.result === 'SKIPPED' ? s.skipped + 1 : s.skipped,
         })),
 
       resetStats: () =>

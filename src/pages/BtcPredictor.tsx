@@ -271,7 +271,7 @@ export const BtcPredictor: React.FC = () => {
 
   const {
     currentPrediction, currentConfidence, currentSignals,
-    cycleStartTime,
+    cycleStartTime, entryPrice,
     history, correct, wrong, skipped,
     setCurrentPrediction, resolvePrediction, addHistoryEntry, resetStats,
   } = usePredictorStore();
@@ -665,19 +665,56 @@ export const BtcPredictor: React.FC = () => {
               {/* Countdown */}
               <CountdownTimer cycleStartTime={cycleStartTime} />
 
-              {/* Score gauge */}
-              <div className="flex flex-col items-center gap-2">
-                <div className="text-xs text-text-muted uppercase tracking-wide">Weighted Score</div>
-                <div className={cn(
-                  'text-4xl font-black font-mono',
-                  (signals?.weightedScore ?? 0) > 0 ? 'text-emerald-400' :
-                  (signals?.weightedScore ?? 0) < 0 ? 'text-red-400' : 'text-text-muted',
-                )}>
-                  {signals ? `${signals.weightedScore >= 0 ? '+' : ''}${signals.weightedScore.toFixed(3)}` : '—'}
+              {/* Score gauge + price info */}
+              <div className="flex flex-col items-center gap-3">
+                <div className="flex flex-col items-center gap-1">
+                  <div className="text-xs text-text-muted uppercase tracking-wide">Weighted Score</div>
+                  <div className={cn(
+                    'text-4xl font-black font-mono',
+                    (signals?.weightedScore ?? 0) > 0 ? 'text-emerald-400' :
+                    (signals?.weightedScore ?? 0) < 0 ? 'text-red-400' : 'text-text-muted',
+                  )}>
+                    {signals ? `${signals.weightedScore >= 0 ? '+' : ''}${signals.weightedScore.toFixed(3)}` : '—'}
+                  </div>
+                  <div className="text-[10px] text-text-muted">threshold ±0.1</div>
                 </div>
-                <div className="text-[10px] text-text-muted">threshold ±0.1</div>
+
+                {/* Price block */}
+                <div className="w-full rounded-xl bg-white/[0.04] border border-white/8 px-4 py-3 flex flex-col gap-2 min-w-[160px]">
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-[11px] text-text-muted uppercase tracking-wide">Entry</span>
+                    <span className="text-sm font-bold font-mono text-text-primary">
+                      {entryPrice && entryPrice > 0
+                        ? `$${entryPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                        : '—'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-[11px] text-text-muted uppercase tracking-wide">Live</span>
+                    <span className="text-sm font-bold font-mono text-primary">
+                      {btcPrice > 0
+                        ? `$${btcPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                        : '—'}
+                    </span>
+                  </div>
+                  {entryPrice && entryPrice > 0 && btcPrice > 0 && (() => {
+                    const pct = ((btcPrice - entryPrice) / entryPrice) * 100;
+                    return (
+                      <div className="flex items-center justify-between gap-4 pt-1 border-t border-white/8">
+                        <span className="text-[11px] text-text-muted uppercase tracking-wide">Δ</span>
+                        <span className={cn(
+                          'text-sm font-bold font-mono',
+                          pct > 0 ? 'text-emerald-400' : pct < 0 ? 'text-red-400' : 'text-text-muted',
+                        )}>
+                          {pct >= 0 ? '+' : ''}{pct.toFixed(3)}%
+                        </span>
+                      </div>
+                    );
+                  })()}
+                </div>
+
                 {signals && (
-                  <div className="flex items-center gap-3 mt-2 text-[11px] text-text-muted">
+                  <div className="flex items-center gap-3 text-[11px] text-text-muted">
                     <span className="flex items-center gap-1">
                       <Newspaper size={10} className="text-amber-400" /> {signals.newsLastFetched ? new Date(signals.newsLastFetched).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—'}
                     </span>
