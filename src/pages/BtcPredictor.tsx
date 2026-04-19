@@ -335,6 +335,25 @@ export const BtcPredictor: React.FC = () => {
   useEffect(() => { btcPriceRef.current  = btcPrice;  }, [btcPrice]);
   useEffect(() => { btcSymbolRef.current = btcSymbol; }, [btcSymbol]); // keep ref in sync
 
+  // ── Auto-resolve stale PENDING predictions on mount ──────────────────────
+  // If user stopped/refreshed before resolution, old PENDINGs stay stuck.
+  // Resolve any whose 5-min window has passed using current price.
+  useEffect(() => {
+    const now = Date.now();
+    const pending = history.filter((e) => e.result === 'PENDING' && e.entryPrice > 0);
+    if (pending.length === 0) return;
+    const stale = pending.filter((e) => now - e.timestamp >= CYCLE_MS);
+    if (stale.length === 0) return;
+    const exitPrice = btcPriceRef.current;
+    stale.forEach((entry) => {
+      resolvePrediction(entry.id, exitPrice);
+    });
+    if (stale.length > 0) {
+      toast(`${stale.length} stale prediction(s) auto-resolved`, { icon: '⏱️' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
+
   // ── Klines cache ref — populated by cycle, reused by fallbacks ───────────
   const klinesRef = useRef<{ close: number; volume: number }[]>([]);
 
@@ -608,8 +627,27 @@ export const BtcPredictor: React.FC = () => {
     isRunningRef.current = true;
     setIsRunning(true);
     setStatusMsg('Starting first prediction cycle…');
+
+    // Restore timers for any PENDING predictions (in case we stopped then restarted)
+    const now = Date.now();
+    const pending = history.filter((e) => e.result === 'PENDING' && e.entryPrice > 0);
+    for (const entry of pending) {
+      const elapsed = now - entry.timestamp;
+      if (elapsed >= CYCLE_MS) {
+        // Already stale — resolve immediately
+        resolvePrediction(entry.id, btcPriceRef.current);
+      } else {
+        // Still within window — restore timer
+        const remaining = CYCLE_MS - elapsed;
+        setTimeout(() => {
+          resolvePrediction(entry.id, btcPriceRef.current);
+          setPendingEntryId(null);
+        }, remaining);
+      }
+    }
+
     void runPredictionCycle();
-  }, [sosoApiKey, runPredictionCycle]);
+  }, [sosoApiKey, runPredictionCycle, history, resolvePrediction]);
 
   const handleStop = useCallback(() => {
     isRunningRef.current = false;
