@@ -5,6 +5,7 @@ import {
   Activity, Newspaper, BarChart3, Zap, AlertTriangle,
 } from 'lucide-react';
 import { useLivePrice } from '../api/useLiveTicker';
+import { wsService } from '../api/websocket'; // used in useOrderBookImbalance + useFundingRate
 import { fetchKlines } from '../api/services';
 import { fetchSosoNews, fetchEtfCurrentMetrics, getNewsTitle } from '../api/sosoServices';
 import { analyzeSentiment } from '../api/geminiClient';
@@ -21,33 +22,36 @@ import { cn } from '../lib/utils';
 import toast from 'react-hot-toast';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const CYCLE_MS = 5 * 60 * 1000;          // 5-minute prediction window
-const NEWS_TTL_MS = 3 * 60 * 1000;       // 3-min cache for news
-const ETF_TTL_MS = 5 * 60 * 1000;        // 5-min cache for ETF
-const LS_NEWS_KEY = 'predictor_news_cache';
-const LS_ETF_KEY  = 'predictor_etf_cache';
-const KLINES_LIMIT = 30;                  // 30 x 1-min candles = enough for all indicators
-const BTC_SYMBOL = 'BTC-USDC';
+const CYCLE_MS      = 5 * 60 * 1000;
+const NEWS_TTL_MS   = 3 * 60 * 1000;
+const ETF_TTL_MS    = 5 * 60 * 1000;
+const LS_NEWS_KEY   = 'predictor_news_cache';
+const LS_ETF_KEY    = 'predictor_etf_cache';
+const KLINES_LIMIT  = 40;               // enough for EMA-21 + microstructure
+const BTC_SYMBOL    = 'BTC-USDC';
+const NEUTRAL_BASE  = 0.15;             // default neutral threshold
+const NEUTRAL_WIDE  = 0.20;             // self-correcting threshold when accuracy drops
+const MIN_CONFIDENCE = 40;             // skip prediction if below this
 
-// ─── Weights ─────────────────────────────────────────────────────────────────
-const WEIGHTS = {
-  news:       0.25,
-  etf:        0.20,
-  rsi:        0.15,
-  ema:        0.15,
-  macd:       0.10,
-  bollinger:  0.10,
-  momentum:   0.05,
-};
+// ─── Weights (must sum to 1.0) ────────────────────────────────────────────────
+const W = {
+  orderBook:      0.28,
+  fundingRate:    0.18,
+  news:           0.15,
+  microstructure: 0.14,
+  etf:            0.12,
+  ema:            0.07,
+  rsi:            0.04,
+  macd:           0.02,
+} as const;
 
 // ─── Technical Indicator Helpers ─────────────────────────────────────────────
 function calcEMA(values: number[], period: number): number[] {
   if (values.length === 0) return [];
   const k = 2 / (period + 1);
   const result: number[] = [values[0]];
-  for (let i = 1; i < values.length; i++) {
+  for (let i = 1; i < values.length; i++)
     result.push(values[i] * k + result[i - 1] * (1 - k));
-  }
   return result;
 }
 
@@ -55,103 +59,132 @@ function calcRSI(closes: number[], period = 14): number {
   if (closes.length < period + 1) return 50;
   let gains = 0, losses = 0;
   for (let i = 1; i <= period; i++) {
-    const diff = closes[i] - closes[i - 1];
-    if (diff > 0) gains += diff; else losses -= diff;
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) gains += d; else losses -= d;
   }
-  let avgGain = gains / period;
-  let avgLoss = losses / period;
+  let avgG = gains / period, avgL = losses / period;
   for (let i = period + 1; i < closes.length; i++) {
-    const diff = closes[i] - closes[i - 1];
-    avgGain = (avgGain * (period - 1) + Math.max(diff, 0)) / period;
-    avgLoss = (avgLoss * (period - 1) + Math.max(-diff, 0)) / period;
+    const d = closes[i] - closes[i - 1];
+    avgG = (avgG * (period - 1) + Math.max(d, 0)) / period;
+    avgL = (avgL * (period - 1) + Math.max(-d, 0)) / period;
   }
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - 100 / (1 + rs);
+  if (avgL === 0) return 100;
+  return 100 - 100 / (1 + avgG / avgL);
 }
 
-interface Indicators {
-  rsi: number;
-  rsiSignal: number;
-  emaSignal: number;
-  macdSignal: number;
-  bollingerSignal: number;
-  momentumSignal: number;
-  volumeSpike: boolean;
+interface TechResult {
+  rsi: number; rsiSignal: number;
+  emaSignal: number; macdSignal: number;
+  microstructureSignal: number; volumeSpike: boolean;
 }
 
-function computeIndicators(klines: { close: number; volume: number }[]): Indicators {
-  const closes = klines.map((k) => Number(k.close));
+function computeIndicators(klines: { close: number; volume: number }[]): TechResult {
+  const closes  = klines.map((k) => Number(k.close));
   const volumes = klines.map((k) => Number(k.volume));
+  const empty: TechResult = { rsi: 50, rsiSignal: 0, emaSignal: 0, macdSignal: 0, microstructureSignal: 0, volumeSpike: false };
+  if (closes.length < 5) return empty;
 
-  if (closes.length < 5) {
-    return { rsi: 50, rsiSignal: 0, emaSignal: 0, macdSignal: 0, bollingerSignal: 0, momentumSignal: 0, volumeSpike: false };
-  }
+  const last = closes.length - 1;
 
-  // RSI
+  // RSI — only extreme readings matter
   const rsi = calcRSI(closes);
-  let rsiSignal = 0;
-  if (rsi < 30) rsiSignal = 1;
-  else if (rsi > 70) rsiSignal = -1;
-  else if (rsi >= 40 && rsi <= 60) rsiSignal = 0;
-  else rsiSignal = rsi < 50 ? 0.3 : -0.3;
+  const rsiSignal = rsi < 30 ? 1 : rsi > 70 ? -1 : 0;
 
-  // EMA crossover (9 vs 21)
+  // EMA 9/21 crossover + distance weighting
   const ema9  = calcEMA(closes, 9);
   const ema21 = calcEMA(closes, 21);
-  const last  = closes.length - 1;
   let emaSignal = 0;
-  if (ema9[last] > ema21[last]) emaSignal = 1;
-  else if (ema9[last] < ema21[last]) emaSignal = -1;
+  if (ema9.length && ema21.length) {
+    const spread = (ema9[last] - ema21[last]) / ema21[last];
+    if (spread > 0.0005) emaSignal = 1;
+    else if (spread < -0.0005) emaSignal = -1;
+  }
 
-  // MACD (12, 26, 9)
+  // MACD — zero-line cross only
   let macdSignal = 0;
   if (closes.length >= 26) {
     const ema12 = calcEMA(closes, 12);
     const ema26 = calcEMA(closes, 26);
     const macdLine = ema12.map((v, i) => v - ema26[i]);
-    const signal9  = calcEMA(macdLine, 9);
-    const histNow  = macdLine[last] - signal9[last];
-    const histPrev = last > 0 ? macdLine[last - 1] - signal9[last - 1] : 0;
-    if (histNow > 0 && histNow > histPrev) macdSignal = 1;
-    else if (histNow < 0 && histNow < histPrev) macdSignal = -1;
-    else macdSignal = histNow > 0 ? 0.4 : -0.4;
+    const sig9 = calcEMA(macdLine, 9);
+    const histNow  = macdLine[last] - sig9[last];
+    const histPrev = macdLine[last - 1] - sig9[last - 1];
+    if (histPrev <= 0 && histNow > 0) macdSignal = 1;   // crossed above zero
+    else if (histPrev >= 0 && histNow < 0) macdSignal = -1; // crossed below zero
   }
 
-  // Bollinger Bands (20, 2)
-  let bollingerSignal = 0;
-  const bbPeriod = Math.min(20, closes.length);
-  const slice = closes.slice(-bbPeriod);
-  const mean = slice.reduce((a, b) => a + b, 0) / bbPeriod;
-  const stdDev = Math.sqrt(slice.reduce((a, b) => a + (b - mean) ** 2, 0) / bbPeriod);
-  const upper = mean + 2 * stdDev;
-  const lower = mean - 2 * stdDev;
-  const lastClose = closes[last];
-  if (lastClose >= upper) bollingerSignal = -1;
-  else if (lastClose <= lower) bollingerSignal = 1;
-  else {
-    // relative position within band: 0=bottom, 1=top → map to -0.5..+0.5
-    const pos = (lastClose - lower) / (upper - lower);
-    bollingerSignal = (0.5 - pos);
+  // Price microstructure: HH/HL pattern + velocity + volume
+  let microstructureSignal = 0;
+  if (closes.length >= 5) {
+    const c = closes.slice(-5);
+    // candle direction pattern (last 3)
+    const allUp   = c[2] > c[1] && c[3] > c[2] && c[4] > c[3];
+    const allDown = c[2] < c[1] && c[3] < c[2] && c[4] < c[3];
+    const patternScore = allUp ? 1 : allDown ? -1 : (c[4] > c[3] ? 0.3 : -0.3);
+    // velocity: rate of change last 60s vs prev 60s  (approximated by last 1 vs prev 1)
+    const velNow  = (c[4] - c[3]) / (c[3] || 1);
+    const velPrev = (c[3] - c[2]) / (c[2] || 1);
+    const velAcc  = velNow > velPrev ? 0.3 : velNow < velPrev ? -0.3 : 0;
+    // volume spike
+    const recentVol = volumes[last] ?? 0;
+    const avg10 = volumes.slice(-11, -1).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(10, volumes.length - 1));
+    const spikeBoost = avg10 > 0 && recentVol > avg10 * 2 ? 0.4 * Math.sign(patternScore) : 0;
+    microstructureSignal = Math.max(-1, Math.min(1, patternScore * 0.5 + velAcc * 0.3 + spikeBoost));
   }
 
-  // Momentum: last 3 candles HH/LL pattern
-  let momentumSignal = 0;
-  if (closes.length >= 4) {
-    const c = closes.slice(-4);
-    const allUp   = c[1] > c[0] && c[2] > c[1] && c[3] > c[2];
-    const allDown = c[1] < c[0] && c[2] < c[1] && c[3] < c[2];
-    if (allUp) momentumSignal = 1;
-    else if (allDown) momentumSignal = -1;
-    else momentumSignal = closes[last] > closes[last - 1] ? 0.3 : -0.3;
-  }
-
-  // Volume spike
   const recentVol = volumes[last] ?? 0;
-  const avg10 = volumes.slice(-11, -1).reduce((a, b) => a + b, 0) / Math.min(10, volumes.length - 1);
-  const volumeSpike = avg10 > 0 && recentVol > avg10 * 1.5;
+  const avg10v = volumes.slice(-11, -1).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(10, volumes.length - 1));
+  const volumeSpike = avg10v > 0 && recentVol > avg10v * 2;
 
-  return { rsi, rsiSignal, emaSignal, macdSignal, bollingerSignal, momentumSignal, volumeSpike };
+  return { rsi, rsiSignal, emaSignal, macdSignal, microstructureSignal, volumeSpike };
+}
+
+// ─── WS Order Book Hook ───────────────────────────────────────────────────────
+interface OBState { imbalance: number; history: number[] }
+function useOrderBookImbalance(symbol: string): OBState {
+  const { isTestnet } = useSettingsStore();
+  const [state, setState] = useState<OBState>({ imbalance: 0.5, history: [] });
+  useEffect(() => {
+    try { wsService.connect(isTestnet); } catch { return; }
+    const ch = JSON.stringify({ channel: 'orderBook', symbols: [symbol] });
+    const unsub = wsService.subscribe(ch, (raw) => {
+      const d = (raw as Record<string, unknown>);
+      const payload = (d.data ?? d) as Record<string, unknown>;
+      const bids = payload.bids as [string, string][] | undefined;
+      const asks = payload.asks as [string, string][] | undefined;
+      if (!bids || !asks) return;
+      const bidVol = bids.slice(0, 10).reduce((s, [, v]) => s + parseFloat(v), 0);
+      const askVol = asks.slice(0, 10).reduce((s, [, v]) => s + parseFloat(v), 0);
+      const total = bidVol + askVol;
+      if (total === 0) return;
+      const imb = bidVol / total;
+      setState((prev) => ({
+        imbalance: imb,
+        history: [...prev.history.slice(-2), imb],
+      }));
+    });
+    return () => unsub();
+  }, [symbol, isTestnet]);
+  return state;
+}
+
+// ─── WS Funding Rate Hook ─────────────────────────────────────────────────────
+function useFundingRate(symbol: string): { rate: number; prev: number } {
+  const { isTestnet } = useSettingsStore();
+  const [state, setState] = useState({ rate: 0, prev: 0 });
+  useEffect(() => {
+    try { wsService.connect(isTestnet); } catch { return; }
+    const ch = JSON.stringify({ channel: 'funding', symbols: [symbol] });
+    const unsub = wsService.subscribe(ch, (raw) => {
+      const d = (raw as Record<string, unknown>);
+      const payload = (d.data ?? d) as Record<string, unknown>;
+      const fr = parseFloat(String(payload.fundingRate ?? payload.fr ?? payload.f ?? 0));
+      if (isNaN(fr)) return;
+      setState((prev) => ({ prev: prev.rate || fr, rate: fr }));
+    });
+    return () => unsub();
+  }, [symbol, isTestnet]);
+  return state;
 }
 
 // ─── Cache helpers (shared with other pages via sosoValueClient memory cache) ─
@@ -343,7 +376,25 @@ export const BtcPredictor: React.FC = () => {
     }
   }, [sosoApiKey]);
 
-  // ── Run full prediction cycle ─────────────────────────────────────────────
+  // ── Order book + funding from WS ───────────────────────────────────────────
+  const obRef  = useRef<{ imbalance: number; history: number[] }>({ imbalance: 0.5, history: [] });
+  const frRef  = useRef<{ rate: number; prev: number }>({ rate: 0, prev: 0 });
+  const ob     = useOrderBookImbalance(BTC_SYMBOL);
+  const fr     = useFundingRate(BTC_SYMBOL);
+  useEffect(() => { obRef.current = ob; }, [ob]);
+  useEffect(() => { frRef.current = fr; }, [fr]);
+
+  // ── Self-correcting neutral threshold ──────────────────────────────────
+  const last20Decided = history.filter((e) => e.result === 'CORRECT' || e.result === 'WRONG').slice(0, 20);
+  const acc20 = last20Decided.length >= 5
+    ? last20Decided.filter((e) => e.result === 'CORRECT').length / last20Decided.length
+    : null;
+  const neutralThreshold = (acc20 !== null && acc20 < 0.45) ? NEUTRAL_WIDE : NEUTRAL_BASE;
+
+  // ── Run full prediction cycle ───────────────────────────────────────────
+  const neutralThresholdRef = useRef(neutralThreshold);
+  useEffect(() => { neutralThresholdRef.current = neutralThreshold; }, [neutralThreshold]);
+
   const runPredictionCycle = useCallback(async () => {
     if (!isRunningRef.current) return;
     setIsAnalyzing(true);
@@ -352,18 +403,43 @@ export const BtcPredictor: React.FC = () => {
     try {
       const price = btcPriceRef.current;
 
-      // 1. Fetch klines for technical indicators
+      // 1. Klines → technical indicators
       setStatusMsg('Fetching 1-min candles…');
       let klines: { close: number; volume: number }[] = [];
       try {
         const raw = await fetchKlines(BTC_SYMBOL, '1m', KLINES_LIMIT, 'perps');
-        klines = (raw as Record<string, unknown>[]).map((k) => ({ close: Number(k.close ?? k.c ?? 0), volume: Number(k.volume ?? k.v ?? 0) }));
+        klines = (raw as Record<string, unknown>[]).map((k) => ({
+          close: Number(k.close ?? k.c ?? 0),
+          volume: Number(k.volume ?? k.v ?? 0),
+        }));
       } catch { /* proceed with empty */ }
-
-      // 2. Technical indicators
       const tech = computeIndicators(klines);
 
-      // 3. News + ETF (cache-first)
+      // 2. Order book signal from WS ref (no extra API call)
+      const curOb = obRef.current;
+      const imb = curOb.imbalance;
+      let obSignal = 0;
+      if (imb >= 0.65) obSignal = 1;
+      else if (imb <= 0.35) obSignal = -1;
+      else obSignal = 0;
+      // acceleration: rising imbalance = stronger signal
+      if (curOb.history.length >= 2) {
+        const trend = curOb.history[curOb.history.length - 1] - curOb.history[0];
+        if (Math.abs(trend) > 0.05) obSignal = Math.sign(trend) as -1 | 0 | 1;
+      }
+
+      // 3. Funding rate signal from WS ref (no extra API call)
+      const curFr = frRef.current;
+      let frSignal = 0;
+      const frRate = curFr.rate;
+      if (frRate > 0.0001) frSignal = -1;       // overleveraged longs → bearish
+      else if (frRate < -0.0001) frSignal = 1;  // overleveraged shorts → bullish squeeze
+      else if (curFr.prev !== 0) {
+        // momentum: rising = bearish pressure, falling = bullish squeeze
+        frSignal = frRate > curFr.prev ? -0.5 : frRate < curFr.prev ? 0.5 : 0;
+      }
+
+      // 4. News + ETF (cache-first, shared with other pages)
       setStatusMsg('Checking SoSoValue signals…');
       const [newsResult, etfResult] = await Promise.allSettled([
         fetchNewsSentiment(),
@@ -372,39 +448,57 @@ export const BtcPredictor: React.FC = () => {
       const news = newsResult.status === 'fulfilled' ? newsResult.value : { score: 0, fetchedAt: Date.now() };
       const etf  = etfResult.status === 'fulfilled'  ? etfResult.value  : { score: 0, fetchedAt: Date.now() };
 
-      // 4. Weighted score
+      // 5. Weighted score
       const score =
-        news.score           * WEIGHTS.news      +
-        etf.score            * WEIGHTS.etf       +
-        tech.rsiSignal       * WEIGHTS.rsi       +
-        tech.emaSignal       * WEIGHTS.ema       +
-        tech.macdSignal      * WEIGHTS.macd      +
-        tech.bollingerSignal * WEIGHTS.bollinger +
-        tech.momentumSignal  * WEIGHTS.momentum;
+        obSignal                   * W.orderBook      +
+        frSignal                   * W.fundingRate    +
+        news.score                 * W.news           +
+        tech.microstructureSignal  * W.microstructure +
+        etf.score                  * W.etf            +
+        tech.emaSignal             * W.ema            +
+        tech.rsiSignal             * W.rsi            +
+        tech.macdSignal            * W.macd;
 
+      const threshold = neutralThresholdRef.current;
+      const confidence = Math.min(100, Math.round((Math.abs(score) / 1.0) * 100));
+
+      // Only predict when confidence > MIN_CONFIDENCE
       const direction: PredictionDirection =
-        score >  0.1 ? 'UP' :
-        score < -0.1 ? 'DOWN' : 'NEUTRAL';
+        score > threshold && confidence >= MIN_CONFIDENCE  ? 'UP'  :
+        score < -threshold && confidence >= MIN_CONFIDENCE ? 'DOWN' : 'NEUTRAL';
 
-      const confidence = Math.min(100, Math.round(Math.abs(score) * 100 / 0.5 * 100));
+      // Count how many signals agree with the direction
+      const signalValues = [obSignal, frSignal, news.score, tech.microstructureSignal,
+                            etf.score, tech.emaSignal, tech.rsiSignal, tech.macdSignal];
+      const dirSign = direction === 'UP' ? 1 : direction === 'DOWN' ? -1 : 0;
+      const nonNeutral = signalValues.filter((v) => Math.abs(v) > 0.05);
+      const agreeing   = nonNeutral.filter((v) => Math.sign(v) === dirSign);
+      const agreementCount = direction === 'NEUTRAL' ? 0 : agreeing.length;
+      const totalSignals   = nonNeutral.length;
 
       const signals: SignalSnapshot = {
         newsSentiment: news.score,
         etfFlow: etf.score,
+        newsLastFetched: news.fetchedAt,
+        etfLastFetched: etf.fetchedAt,
+        orderBookImbalance: imb,
+        orderBookSignal: obSignal,
+        fundingRate: frRate,
+        fundingRateSignal: frSignal,
+        microstructureSignal: tech.microstructureSignal,
+        volumeSpike: tech.volumeSpike,
         rsi: tech.rsi,
         rsiSignal: tech.rsiSignal,
         emaSignal: tech.emaSignal,
         macdSignal: tech.macdSignal,
-        bollingerSignal: tech.bollingerSignal,
-        momentumSignal: tech.momentumSignal,
         weightedScore: score,
-        newsLastFetched: news.fetchedAt,
-        etfLastFetched: etf.fetchedAt,
+        agreementCount,
+        totalSignals,
       };
 
       setCurrentPrediction(direction, confidence, signals, price);
 
-      // 5. Store as PENDING history entry
+      // 6. Store as history entry
       const id = `pred_${Date.now()}`;
       const entry: PredictionEntry = {
         id,
@@ -422,18 +516,18 @@ export const BtcPredictor: React.FC = () => {
 
       setStatusMsg(
         direction === 'NEUTRAL'
-          ? 'Score too close to call — NEUTRAL, skipped'
-          : `Prediction: ${direction} (score ${score.toFixed(3)}) — waiting 5 min…`,
+          ? `Score ${score.toFixed(3)} within ±${threshold} threshold — NEUTRAL, skipped`
+          : `↑ ${direction} predicted (score ${score.toFixed(3)}, ${agreementCount}/${totalSignals} signals agree) — resolving in 5 min…`,
       );
 
-      // 6. Schedule resolution after 5 minutes
+      // 7. Schedule resolution after 5 minutes
       if (direction !== 'NEUTRAL') {
         if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current);
         resolveTimerRef.current = setTimeout(() => {
           const exitPrice = btcPriceRef.current;
           resolvePrediction(id, exitPrice);
           setPendingEntryId(null);
-          setStatusMsg('Last prediction resolved. Starting next cycle…');
+          setStatusMsg('Prediction resolved. Starting next cycle…');
         }, CYCLE_MS);
       }
 
@@ -445,7 +539,7 @@ export const BtcPredictor: React.FC = () => {
       setIsAnalyzing(false);
     }
 
-    // 7. Schedule next cycle
+    // 8. Schedule next cycle
     if (isRunningRef.current) {
       if (cycleTimerRef.current) clearTimeout(cycleTimerRef.current);
       cycleTimerRef.current = setTimeout(runPredictionCycle, CYCLE_MS);
@@ -476,74 +570,79 @@ export const BtcPredictor: React.FC = () => {
     if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current);
   }, []);
 
-  // ── Derived stats ──────────────────────────────────────────────────────────
-  const total    = correct + wrong;
-  const accuracy = total > 0 ? Math.round((correct / total) * 100) : null;
+  // ── Derived stats ──────────────────────────────────────────────────────
+  const decided = history.filter((e) => e.result === 'CORRECT' || e.result === 'WRONG');
+  const total     = correct + wrong;
+  const accuracy  = total > 0 ? Math.round((correct / total) * 100) : null;
 
-  const sparkValues: (0 | 1)[] = history
-    .filter((e) => e.result === 'CORRECT' || e.result === 'WRONG')
-    .slice(0, 10)
-    .map((e) => (e.result === 'CORRECT' ? 1 : 0))
+  const last10 = decided.slice(0, 10);
+  const acc10  = last10.length > 0 ? Math.round(last10.filter((e) => e.result === 'CORRECT').length / last10.length * 100) : null;
+  const acc20val = last20Decided.length > 0 ? Math.round(last20Decided.filter((e) => e.result === 'CORRECT').length / last20Decided.length * 100) : null;
+
+  const sparkValues: (0 | 1)[] = last10
+    .map((e) => (e.result === 'CORRECT' ? 1 : 0) as 0 | 1)
     .reverse();
 
   const signals = currentSignals;
 
   // ── Signal table rows ──────────────────────────────────────────────────────
   type SignalDef = {
-    label: string;
-    value: string;
-    signal: number;
-    weight: number;
-    poweredBy?: boolean;
-    fetchedAt?: number | null;
+    label: string; value: string; signal: number; weight: number;
+    poweredBy?: boolean; fetchedAt?: number | null;
   };
 
   const signalRows: SignalDef[] = signals ? [
     {
+      label: 'Order Book Imbalance',
+      value: `${(signals.orderBookImbalance * 100).toFixed(1)}% bids`,
+      signal: signals.orderBookSignal,
+      weight: W.orderBook,
+    },
+    {
+      label: 'Funding Rate Momentum',
+      value: signals.fundingRate !== 0 ? `${(signals.fundingRate * 100).toFixed(4)}%` : 'N/A',
+      signal: signals.fundingRateSignal,
+      weight: W.fundingRate,
+    },
+    {
       label: 'News Sentiment',
       value: signals.newsSentiment >= 0.1 ? 'Bullish' : signals.newsSentiment <= -0.1 ? 'Bearish' : 'Neutral',
       signal: signals.newsSentiment,
-      weight: WEIGHTS.news,
+      weight: W.news,
       poweredBy: true,
       fetchedAt: signals.newsLastFetched,
+    },
+    {
+      label: 'Price Microstructure',
+      value: signals.microstructureSignal >= 0.5 ? 'HH/HL + Vol' : signals.microstructureSignal <= -0.5 ? 'LH/LL + Vol' : 'Mixed',
+      signal: signals.microstructureSignal,
+      weight: W.microstructure,
     },
     {
       label: 'BTC ETF Flow',
       value: signals.etfFlow >= 0 ? `+${(signals.etfFlow * 500).toFixed(0)}M` : `${(signals.etfFlow * 500).toFixed(0)}M`,
       signal: signals.etfFlow,
-      weight: WEIGHTS.etf,
+      weight: W.etf,
       poweredBy: true,
       fetchedAt: signals.etfLastFetched,
-    },
-    {
-      label: `RSI (14)`,
-      value: signals.rsi.toFixed(1),
-      signal: signals.rsiSignal,
-      weight: WEIGHTS.rsi,
     },
     {
       label: 'EMA 9/21 Cross',
       value: signals.emaSignal > 0 ? 'EMA9 > EMA21' : signals.emaSignal < 0 ? 'EMA9 < EMA21' : 'No cross',
       signal: signals.emaSignal,
-      weight: WEIGHTS.ema,
+      weight: W.ema,
     },
     {
-      label: 'MACD Histogram',
-      value: signals.macdSignal > 0 ? 'Rising' : signals.macdSignal < 0 ? 'Falling' : 'Flat',
+      label: 'RSI (14) Extreme',
+      value: `${signals.rsi.toFixed(1)}${signals.rsi < 30 ? ' — Oversold' : signals.rsi > 70 ? ' — Overbought' : ' — Neutral zone'}`,
+      signal: signals.rsiSignal,
+      weight: W.rsi,
+    },
+    {
+      label: 'MACD Zero Cross',
+      value: signals.macdSignal === 1 ? 'Crossed above 0' : signals.macdSignal === -1 ? 'Crossed below 0' : 'No cross',
       signal: signals.macdSignal,
-      weight: WEIGHTS.macd,
-    },
-    {
-      label: 'Bollinger Bands',
-      value: signals.bollingerSignal >= 0.8 ? 'Near lower' : signals.bollingerSignal <= -0.8 ? 'Near upper' : 'Mid-band',
-      signal: signals.bollingerSignal,
-      weight: WEIGHTS.bollinger,
-    },
-    {
-      label: 'Price Momentum',
-      value: signals.momentumSignal >= 0.8 ? 'HH pattern' : signals.momentumSignal <= -0.8 ? 'LL pattern' : 'Mixed',
-      signal: signals.momentumSignal,
-      weight: WEIGHTS.momentum,
+      weight: W.macd,
     },
   ] : [];
 
@@ -807,9 +906,16 @@ export const BtcPredictor: React.FC = () => {
 
           {/* Accuracy Tracker */}
           <Card className="p-0 overflow-hidden">
-            <div className="px-5 py-4 border-b border-white/5 flex items-center gap-2">
-              <Target size={16} className="text-primary" />
-              <h2 className="text-sm font-bold text-text-primary uppercase tracking-wide">Accuracy Tracker</h2>
+            <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Target size={16} className="text-primary" />
+                <h2 className="text-sm font-bold text-text-primary uppercase tracking-wide">Accuracy Tracker</h2>
+              </div>
+              {neutralThreshold > NEUTRAL_BASE && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-400/15 text-amber-400 border border-amber-400/20 font-semibold">
+                  Auto-wide threshold
+                </span>
+              )}
             </div>
             <div className="p-5 flex flex-col gap-4">
               {/* Big accuracy % */}
@@ -822,7 +928,7 @@ export const BtcPredictor: React.FC = () => {
                 )}>
                   {accuracy !== null ? `${accuracy}%` : '—'}
                 </div>
-                <div className="text-xs text-text-muted">Overall Accuracy</div>
+                <div className="text-xs text-text-muted">All-time ({total} predictions)</div>
                 {total > 0 && (
                   <div className="w-full h-2 rounded-full bg-white/10 mt-3 overflow-hidden">
                     <div
@@ -835,6 +941,36 @@ export const BtcPredictor: React.FC = () => {
                     />
                   </div>
                 )}
+              </div>
+
+              {/* Rolling accuracy rows */}
+              <div className="flex flex-col gap-2">
+                {[
+                  { label: 'Last 10', val: acc10,   n: last10.length },
+                  { label: 'Last 20', val: acc20val, n: last20Decided.length },
+                  { label: 'All-time', val: accuracy, n: total },
+                ].map(({ label, val, n }) => (
+                  <div key={label} className="flex items-center gap-2">
+                    <span className="text-[11px] text-text-muted w-16 shrink-0">{label}</span>
+                    <div className="flex-1 h-1.5 rounded-full bg-white/8 overflow-hidden">
+                      <div
+                        className={cn(
+                          'h-full rounded-full transition-all duration-700',
+                          (val ?? 0) >= 60 ? 'bg-emerald-400' :
+                          (val ?? 0) >= 45 ? 'bg-amber-400' : 'bg-red-400/60',
+                        )}
+                        style={{ width: `${val ?? 0}%` }}
+                      />
+                    </div>
+                    <span className={cn(
+                      'text-xs font-bold font-mono w-10 text-right shrink-0',
+                      val === null ? 'text-text-muted' :
+                      val >= 60 ? 'text-emerald-400' : val >= 45 ? 'text-amber-400' : 'text-red-400',
+                    )}>
+                      {val !== null && n >= 3 ? `${val}%` : '—'}
+                    </span>
+                  </div>
+                ))}
               </div>
 
               {/* Counters */}

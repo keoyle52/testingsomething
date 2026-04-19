@@ -5,17 +5,29 @@ export type PredictionDirection = 'UP' | 'DOWN' | 'NEUTRAL';
 export type PredictionResult = 'CORRECT' | 'WRONG' | 'SKIPPED' | 'PENDING';
 
 export interface SignalSnapshot {
-  newsSentiment: number;    // -1 to +1
-  etfFlow: number;          // -1 to +1
-  rsi: number;              // raw RSI value
-  rsiSignal: number;        // -1 to +1
-  emaSignal: number;        // -1 to +1
-  macdSignal: number;       // -1 to +1
-  bollingerSignal: number;  // -1 to +1
-  momentumSignal: number;   // -1 to +1
-  weightedScore: number;    // final weighted sum
+  // SoSoValue signals
+  newsSentiment: number;        // -1 to +1
+  etfFlow: number;              // -1 to +1
   newsLastFetched: number | null;
   etfLastFetched: number | null;
+  // Order book
+  orderBookImbalance: number;   // raw ratio bid/(bid+ask)
+  orderBookSignal: number;      // -1 / 0 / +1
+  // Funding rate
+  fundingRate: number;          // raw value
+  fundingRateSignal: number;    // -1 / 0 / +1
+  // Price microstructure
+  microstructureSignal: number; // -1 to +1
+  volumeSpike: boolean;
+  // Technical
+  rsi: number;
+  rsiSignal: number;
+  emaSignal: number;
+  macdSignal: number;
+  // Composite
+  weightedScore: number;
+  agreementCount: number;       // how many signals agree with direction
+  totalSignals: number;         // total non-neutral signals counted
 }
 
 export interface PredictionEntry {
@@ -111,7 +123,7 @@ export const usePredictorStore = create<PredictorState>()(
         set({ history: [], correct: 0, wrong: 0, skipped: 0, currentPrediction: 'NEUTRAL', currentConfidence: 0, currentSignals: null, cycleStartTime: null, entryPrice: null }),
     }),
     {
-      name: 'predictor-store-v1',
+      name: 'predictor-store-v2',
       partialize: (s) => ({
         history: s.history,
         correct: s.correct,
