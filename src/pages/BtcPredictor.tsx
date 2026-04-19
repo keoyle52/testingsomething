@@ -4,9 +4,9 @@ import {
   CheckCircle2, XCircle, SkipForward, Target, Clock,
   Activity, Newspaper, BarChart3, Zap, AlertTriangle,
 } from 'lucide-react';
-import { useLivePrice } from '../api/useLiveTicker';
+import { useLiveTicker, type LiveTicker } from '../api/useLiveTicker';
 import { wsService } from '../api/websocket'; // used in useOrderBookImbalance + useFundingRate
-import { fetchKlines } from '../api/services';
+import { fetchKlines, fetchTickers } from '../api/services';
 import { fetchSosoNews, fetchEtfCurrentMetrics, getNewsTitle } from '../api/sosoServices';
 import { analyzeSentiment } from '../api/geminiClient';
 import { useSettingsStore } from '../store/settingsStore';
@@ -28,7 +28,7 @@ const ETF_TTL_MS    = 5 * 60 * 1000;
 const LS_NEWS_KEY   = 'predictor_news_cache';
 const LS_ETF_KEY    = 'predictor_etf_cache';
 const KLINES_LIMIT  = 40;               // enough for EMA-21 + microstructure
-const BTC_SYMBOL    = 'BTC-USDC';
+const BTC_SYMBOL_HINT = 'BTC';        // substring match against fetchTickers result
 const NEUTRAL_BASE  = 0.15;             // default neutral threshold
 const NEUTRAL_WIDE  = 0.20;             // self-correcting threshold when accuracy drops
 const MIN_CONFIDENCE = 40;             // skip prediction if below this
@@ -300,7 +300,28 @@ const HistoryRow: React.FC<{ entry: PredictionEntry; idx: number }> = ({ entry, 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export const BtcPredictor: React.FC = () => {
   const { sosoApiKey, geminiApiKey } = useSettingsStore();
-  const btcPrice = useLivePrice(BTC_SYMBOL, 0);
+
+  // ── Discover BTC symbol + live price (same path as Dashboard) ──────────
+  const [rawTicker, setRawTicker] = useState<LiveTicker[]>([]);
+  const [btcSymbol, setBtcSymbol] = useState('BTC-USDC');
+  useEffect(() => {
+    fetchTickers('perps').then((res) => {
+      const arr = Array.isArray(res) ? res as Record<string, unknown>[] : [];
+      const btcRow = arr.find((t) => String(t.symbol ?? '').toUpperCase().includes(BTC_SYMBOL_HINT));
+      if (btcRow) {
+        const sym = String(btcRow.symbol);
+        setBtcSymbol(sym);
+        setRawTicker([{
+          symbol: sym,
+          lastPrice: parseFloat(String(btcRow.lastPrice ?? btcRow.close ?? 0)),
+          change24h: parseFloat(String(btcRow.priceChangePercent ?? btcRow.change ?? 0)),
+          volume24h: parseFloat(String(btcRow.quoteVolume ?? btcRow.volume ?? 0)),
+        }]);
+      }
+    }).catch(() => {});
+  }, []);
+  const liveTickers = useLiveTicker(rawTicker, [btcSymbol]);
+  const btcPrice = (liveTickers.find((t) => t.symbol === btcSymbol) ?? rawTicker[0])?.lastPrice ?? 0;
 
   const {
     currentPrediction, currentConfidence, currentSignals,
@@ -315,11 +336,13 @@ export const BtcPredictor: React.FC = () => {
   const [, setPendingEntryId] = useState<string | null>(null);
 
   const btcPriceRef      = useRef(btcPrice);
+  const btcSymbolRef     = useRef(btcSymbol);
   const isRunningRef     = useRef(false);
   const cycleTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resolveTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => { btcPriceRef.current = btcPrice; }, [btcPrice]);
+  useEffect(() => { btcPriceRef.current  = btcPrice;  }, [btcPrice]);
+  useEffect(() => { btcSymbolRef.current = btcSymbol; }, [btcSymbol]);
 
   // ── Fetch news sentiment via shared cache ──────────────────────────────────
   const fetchNewsSentiment = useCallback(async (): Promise<{ score: number; fetchedAt: number }> => {
@@ -379,8 +402,8 @@ export const BtcPredictor: React.FC = () => {
   // ── Order book + funding from WS ───────────────────────────────────────────
   const obRef  = useRef<{ imbalance: number; history: number[] }>({ imbalance: 0.5, history: [] });
   const frRef  = useRef<{ rate: number; prev: number }>({ rate: 0, prev: 0 });
-  const ob     = useOrderBookImbalance(BTC_SYMBOL);
-  const fr     = useFundingRate(BTC_SYMBOL);
+  const ob     = useOrderBookImbalance(btcSymbol);
+  const fr     = useFundingRate(btcSymbol);
   useEffect(() => { obRef.current = ob; }, [ob]);
   useEffect(() => { frRef.current = fr; }, [fr]);
 
@@ -407,7 +430,7 @@ export const BtcPredictor: React.FC = () => {
       setStatusMsg('Fetching 1-min candles…');
       let klines: { close: number; volume: number }[] = [];
       try {
-        const raw = await fetchKlines(BTC_SYMBOL, '1m', KLINES_LIMIT, 'perps');
+        const raw = await fetchKlines(btcSymbolRef.current, '1m', KLINES_LIMIT, 'perps');
         klines = (raw as Record<string, unknown>[]).map((k) => ({
           close: Number(k.close ?? k.c ?? 0),
           volume: Number(k.volume ?? k.v ?? 0),
