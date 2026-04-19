@@ -345,6 +345,10 @@ export const BtcPredictor: React.FC = () => {
     const stale = pending.filter((e) => now - e.timestamp >= CYCLE_MS);
     if (stale.length === 0) return;
     const exitPrice = btcPriceRef.current;
+    if (exitPrice <= 0) {
+      toast('BTC price unavailable — cannot resolve stale predictions', { icon: '⚠️' });
+      return;
+    }
     stale.forEach((entry) => {
       resolvePrediction(entry.id, exitPrice);
     });
@@ -599,6 +603,11 @@ export const BtcPredictor: React.FC = () => {
         if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current);
         resolveTimerRef.current = setTimeout(() => {
           const exitPrice = btcPriceRef.current;
+          if (exitPrice <= 0) {
+            toast('BTC price unavailable — prediction resolution skipped', { icon: '⚠️' });
+            setPendingEntryId(null);
+            return;
+          }
           resolvePrediction(id, exitPrice);
           setPendingEntryId(null);
           setStatusMsg('Prediction resolved. Starting next cycle…');
@@ -631,18 +640,24 @@ export const BtcPredictor: React.FC = () => {
     // Restore timers for any PENDING predictions (in case we stopped then restarted)
     const now = Date.now();
     const pending = history.filter((e) => e.result === 'PENDING' && e.entryPrice > 0);
-    for (const entry of pending) {
-      const elapsed = now - entry.timestamp;
-      if (elapsed >= CYCLE_MS) {
-        // Already stale — resolve immediately
-        resolvePrediction(entry.id, btcPriceRef.current);
-      } else {
-        // Still within window — restore timer
-        const remaining = CYCLE_MS - elapsed;
-        setTimeout(() => {
-          resolvePrediction(entry.id, btcPriceRef.current);
-          setPendingEntryId(null);
-        }, remaining);
+    const currentPrice = btcPriceRef.current;
+    if (currentPrice <= 0) {
+      toast('BTC price unavailable — prediction timers will retry on next tick', { icon: '⚠️' });
+    } else {
+      for (const entry of pending) {
+        const elapsed = now - entry.timestamp;
+        if (elapsed >= CYCLE_MS) {
+          // Already stale — resolve immediately
+          resolvePrediction(entry.id, currentPrice);
+        } else {
+          // Still within window — restore timer
+          const remaining = CYCLE_MS - elapsed;
+          setTimeout(() => {
+            const p = btcPriceRef.current;
+            if (p > 0) resolvePrediction(entry.id, p);
+            setPendingEntryId(null);
+          }, remaining);
+        }
       }
     }
 
