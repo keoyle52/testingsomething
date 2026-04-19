@@ -40,7 +40,6 @@ const ScheduleCancel = lazyFrom(() => import('./pages/ScheduleCancel').then(m =>
 const Alerts       = lazyFrom(() => import('./pages/Alerts').then(m => ({ default: m.Alerts })), 'Alerts');
 const Backtesting  = lazyFrom(() => import('./pages/Backtesting').then(m => ({ default: m.Backtesting })), 'Backtesting');
 const EtfTracker   = lazyFrom(() => import('./pages/EtfTracker').then(m => ({ default: m.EtfTracker })), 'EtfTracker');
-const CryptoNews   = lazyFrom(() => import('./pages/CryptoNews').then(m => ({ default: m.CryptoNews })), 'CryptoNews');
 const NewsBot      = lazyFrom(() => import('./pages/NewsBot').then(m => ({ default: m.NewsBot })), 'NewsBot');
 const BtcPredictor = lazyFrom(() => import('./pages/BtcPredictor').then(m => ({ default: m.BtcPredictor })), 'BtcPredictor');
 
@@ -148,7 +147,6 @@ function App() {
                       <Route path="/alerts"          element={<Alerts />} />
                       <Route path="/backtesting"     element={<Backtesting />} />
                       <Route path="/etf-tracker"     element={<EtfTracker />} />
-                      <Route path="/news"            element={<CryptoNews />} />
                       <Route path="/news-bot"        element={<NewsBot />} />
                       <Route path="/btc-predictor"   element={<BtcPredictor />} />
                       <Route path="*"                element={<Navigate to="/dashboard" replace />} />

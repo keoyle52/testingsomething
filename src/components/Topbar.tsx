@@ -16,7 +16,6 @@ const PAGE_TITLES: Record<string, string> = {
   '/alerts':          'Price Alerts',
   '/backtesting':     'Backtesting',
   '/etf-tracker':     'ETF Tracker',
-  '/news':            'Crypto News',
   '/btc-predictor':   'BTC Price Predictor',
   '/settings':        'Settings',
 };

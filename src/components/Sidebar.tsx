@@ -2,7 +2,7 @@ import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { 
   LayoutDashboard, Grid2X2, Clock, Repeat, Users, LineChart, Coins, 
-  TimerOff, Bell, FlaskConical, Settings, Zap, BarChart2, Newspaper, Bot, Wrench, Brain
+  TimerOff, Bell, FlaskConical, Settings, Zap, BarChart2, Bot, Wrench, Brain
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -37,7 +37,6 @@ const NAV_MENU = [
     items: [
       { to: '/funding', icon: Coins, label: 'Funding Rates' },
       { to: '/etf-tracker', icon: BarChart2, label: 'ETF Tracker' },
-      { to: '/news', icon: Newspaper, label: 'Crypto News' },
     ]
   },
   {
