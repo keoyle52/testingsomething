@@ -326,20 +326,45 @@ export const BtcPredictor: React.FC = () => {
   useEffect(() => { btcPriceRef.current  = btcPrice;  }, [btcPrice]);
   useEffect(() => { btcSymbolRef.current = btcSymbol; }, [btcSymbol]); // keep ref in sync
 
+  // ── Klines cache ref — populated by cycle, reused by fallbacks ───────────
+  const klinesRef = useRef<{ close: number; volume: number }[]>([]);
+
+  // ── Fallback: news → mark-price vs SMA-10 momentum ────────────────────
+  const newsFallbackScore = useCallback((): number => {
+    const closes = klinesRef.current.map((k) => k.close);
+    if (closes.length < 10) return 0;
+    const sma10 = closes.slice(-10).reduce((a, b) => a + b, 0) / 10;
+    const last  = closes[closes.length - 1];
+    // normalise: ±0.5% move from SMA maps to ±1
+    return Math.max(-1, Math.min(1, (last - sma10) / sma10 / 0.005));
+  }, []);
+
+  // ── Fallback: ETF → continuous RSI score (−1 to +1, full range) ───────
+  const etfFallbackScore = useCallback((): number => {
+    const closes = klinesRef.current.map((k) => k.close);
+    if (closes.length < 15) return 0;
+    const rsi = calcRSI(closes);
+    // map RSI 0-100 → −1 to +1 linearly (50 = 0)
+    return Math.max(-1, Math.min(1, (rsi - 50) / 50));
+  }, []);
+
   // ── Fetch news sentiment via shared cache ──────────────────────────────────
-  const fetchNewsSentiment = useCallback(async (): Promise<{ score: number; fetchedAt: number }> => {
+  const fetchNewsSentiment = useCallback(async (): Promise<{ score: number; fromFallback?: boolean; fetchedAt: number }> => {
     const cached = lsRead<{ score: number }>(LS_NEWS_KEY);
     if (cached && Date.now() - cached.fetchedAt < NEWS_TTL_MS) {
       return { score: cached.data.score, fetchedAt: cached.fetchedAt };
     }
-    if (!sosoApiKey) return { score: 0, fetchedAt: Date.now() };
+    if (!sosoApiKey) {
+      return { score: newsFallbackScore(), fromFallback: true, fetchedAt: Date.now() };
+    }
 
     try {
       const result = await fetchSosoNews(1, 10);
       const items  = result.list ?? [];
-      if (items.length === 0) return { score: 0, fetchedAt: Date.now() };
+      if (items.length === 0) {
+        return { score: newsFallbackScore(), fromFallback: true, fetchedAt: Date.now() };
+      }
 
-      // Score with Gemini if available, else fallback to 0
       let total = 0;
       let count = 0;
       for (const item of items.slice(0, 5)) {
@@ -353,33 +378,37 @@ export const BtcPredictor: React.FC = () => {
           count++;
         } catch { /* skip individual failures */ }
       }
-      const score = count > 0 ? total / count : 0;
+      const score = count > 0 ? total / count : newsFallbackScore();
       lsWrite(LS_NEWS_KEY, { score });
       return { score, fetchedAt: Date.now() };
     } catch {
-      return { score: 0, fetchedAt: Date.now() };
+      return { score: newsFallbackScore(), fromFallback: true, fetchedAt: Date.now() };
     }
-  }, [sosoApiKey, geminiApiKey]);
+  }, [sosoApiKey, geminiApiKey, newsFallbackScore]);
 
   // ── Fetch ETF flow via shared cache ───────────────────────────────────────
-  const fetchEtfSignal = useCallback(async (): Promise<{ score: number; fetchedAt: number }> => {
+  const fetchEtfSignal = useCallback(async (): Promise<{ score: number; fromFallback?: boolean; fetchedAt: number }> => {
     const cached = lsRead<{ score: number }>(LS_ETF_KEY);
     if (cached && Date.now() - cached.fetchedAt < ETF_TTL_MS) {
       return { score: cached.data.score, fetchedAt: cached.fetchedAt };
     }
-    if (!sosoApiKey) return { score: 0, fetchedAt: Date.now() };
+    if (!sosoApiKey) {
+      return { score: etfFallbackScore(), fromFallback: true, fetchedAt: Date.now() };
+    }
 
     try {
       const metrics = await fetchEtfCurrentMetrics('us-btc-spot');
-      const flow = metrics?.dailyNetInflow?.value ?? 0;
-      // Normalise: ±$500M maps to ±1
-      const score = Math.max(-1, Math.min(1, (flow ?? 0) / 5e8));
+      const flow = metrics?.dailyNetInflow?.value ?? null;
+      if (flow === null) {
+        return { score: etfFallbackScore(), fromFallback: true, fetchedAt: Date.now() };
+      }
+      const score = Math.max(-1, Math.min(1, flow / 5e8));
       lsWrite(LS_ETF_KEY, { score });
       return { score, fetchedAt: Date.now() };
     } catch {
-      return { score: 0, fetchedAt: Date.now() };
+      return { score: etfFallbackScore(), fromFallback: true, fetchedAt: Date.now() };
     }
-  }, [sosoApiKey]);
+  }, [sosoApiKey, etfFallbackScore]);
 
   // ── Order book + funding via REST (fetched each cycle) ───────────────────
   const prevFundingRef = useRef(0);
@@ -413,6 +442,7 @@ export const BtcPredictor: React.FC = () => {
           volume: Number(k.volume ?? k.v ?? 0),
         }));
       } catch { /* proceed with empty */ }
+      klinesRef.current = klines;   // share with fallback functions
       const tech = computeIndicators(klines);
 
       // 2. Order book — REST fetch
@@ -450,8 +480,8 @@ export const BtcPredictor: React.FC = () => {
         fetchNewsSentiment(),
         fetchEtfSignal(),
       ]);
-      const news = newsResult.status === 'fulfilled' ? newsResult.value : { score: 0, fetchedAt: Date.now() };
-      const etf  = etfResult.status === 'fulfilled'  ? etfResult.value  : { score: 0, fetchedAt: Date.now() };
+      const news = newsResult.status === 'fulfilled' ? newsResult.value : { score: newsFallbackScore(), fromFallback: true, fetchedAt: Date.now() };
+      const etf  = etfResult.status === 'fulfilled'  ? etfResult.value  : { score: etfFallbackScore(),  fromFallback: true, fetchedAt: Date.now() };
 
       // 5. Weighted score
       const score =
@@ -486,6 +516,8 @@ export const BtcPredictor: React.FC = () => {
         etfFlow: etf.score,
         newsLastFetched: news.fetchedAt,
         etfLastFetched: etf.fetchedAt,
+        newsFallback: !!(news as { fromFallback?: boolean }).fromFallback,
+        etfFallback:  !!(etf  as { fromFallback?: boolean }).fromFallback,
         orderBookImbalance: imb,
         orderBookSignal: obSignal,
         fundingRate: frRate,
@@ -553,8 +585,7 @@ export const BtcPredictor: React.FC = () => {
 
   const handleStart = useCallback(() => {
     if (!sosoApiKey) {
-      toast.error('Set your SoSoValue API key in Settings first.');
-      return;
+      toast('SoSoValue key missing — running with klines-based fallbacks for news & ETF signals.', { icon: '⚠️' });
     }
     isRunningRef.current = true;
     setIsRunning(true);
@@ -593,7 +624,7 @@ export const BtcPredictor: React.FC = () => {
   // ── Signal table rows ──────────────────────────────────────────────────────
   type SignalDef = {
     label: string; value: string; signal: number; weight: number;
-    poweredBy?: boolean; fetchedAt?: number | null;
+    poweredBy?: boolean; isFallback?: boolean; fetchedAt?: number | null;
   };
 
   const signalRows: SignalDef[] = signals ? [
@@ -614,8 +645,9 @@ export const BtcPredictor: React.FC = () => {
       value: signals.newsSentiment >= 0.1 ? 'Bullish' : signals.newsSentiment <= -0.1 ? 'Bearish' : 'Neutral',
       signal: signals.newsSentiment,
       weight: W.news,
-      poweredBy: true,
-      fetchedAt: signals.newsLastFetched,
+      poweredBy: !signals.newsFallback,
+      isFallback: !!signals.newsFallback,
+      fetchedAt: signals.newsFallback ? null : signals.newsLastFetched,
     },
     {
       label: 'Price Microstructure',
@@ -628,8 +660,9 @@ export const BtcPredictor: React.FC = () => {
       value: signals.etfFlow >= 0 ? `+${(signals.etfFlow * 500).toFixed(0)}M` : `${(signals.etfFlow * 500).toFixed(0)}M`,
       signal: signals.etfFlow,
       weight: W.etf,
-      poweredBy: true,
-      fetchedAt: signals.etfLastFetched,
+      poweredBy: !signals.etfFallback,
+      isFallback: !!signals.etfFallback,
+      fetchedAt: signals.etfFallback ? null : signals.etfLastFetched,
     },
     {
       label: 'EMA 9/21 Cross',
@@ -858,6 +891,11 @@ export const BtcPredictor: React.FC = () => {
                             {row.poweredBy && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-semibold tracking-wide border border-amber-500/20">
                                 SoSoValue
+                              </span>
+                            )}
+                            {row.isFallback && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/20 text-slate-400 font-semibold tracking-wide border border-slate-500/20" title="SoSoValue API unavailable — using klines-derived fallback">
+                                Fallback
                               </span>
                             )}
                           </div>

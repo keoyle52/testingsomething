@@ -10,6 +10,8 @@ export interface SignalSnapshot {
   etfFlow: number;              // -1 to +1
   newsLastFetched: number | null;
   etfLastFetched: number | null;
+  newsFallback?: boolean;           // true when SoSoValue news was unavailable
+  etfFallback?: boolean;            // true when SoSoValue ETF was unavailable
   // Order book
   orderBookImbalance: number;   // raw ratio bid/(bid+ask)
   orderBookSignal: number;      // -1 / 0 / +1
