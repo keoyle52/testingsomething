@@ -63,12 +63,15 @@ interface PredictorState {
   // ── Trading settings (optional auto-order placement) ──
   /** When true, predictor places a market order on each non-neutral prediction. */
   autoTradeEnabled: boolean;
-  /** Order quantity in BTC. */
-  tradeQuantity: string;
-  /** Leverage applied before placing the order (1-50). */
+  /** Notional order size in USDT. Converted to BTC quantity at order time. */
+  tradeAmountUsdt: string;
+  /** Leverage applied before placing the order. SoDEX cap = 25x. */
   tradeLeverage: number;
-  /** When true, only place order on the very first prediction after Start. */
-  tradeOncePerStart: boolean;
+  /** When true, on a NEUTRAL prediction the open position is also closed. */
+  closeOnNeutral: boolean;
+
+  // ── Currently open bot-managed position ──
+  openPosition: OpenPosition | null;
 
   // actions
   setCurrentPrediction: (d: PredictionDirection, conf: number, signals: SignalSnapshot, price: number) => void;
@@ -76,9 +79,26 @@ interface PredictorState {
   addHistoryEntry: (entry: PredictionEntry) => void;
   resetStats: () => void;
   setAutoTradeEnabled: (v: boolean) => void;
-  setTradeQuantity: (v: string) => void;
+  setTradeAmountUsdt: (v: string) => void;
   setTradeLeverage: (v: number) => void;
-  setTradeOncePerStart: (v: boolean) => void;
+  setCloseOnNeutral: (v: boolean) => void;
+  setOpenPosition: (p: OpenPosition | null) => void;
+}
+
+/**
+ * Snapshot of the position the predictor opened. Tracks just enough
+ * to display PnL in the UI and to send the matching reduce-only close.
+ */
+export interface OpenPosition {
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  /** BTC quantity sent to the exchange (notional / entryPrice). */
+  quantity: number;
+  /** USDT amount the user requested when opening. */
+  notionalUsdt: number;
+  entryPrice: number;
+  leverage: number;
+  openedAt: number;
 }
 
 export const usePredictorStore = create<PredictorState>()(
@@ -96,14 +116,17 @@ export const usePredictorStore = create<PredictorState>()(
 
       // Trading defaults: disabled, conservative size + leverage
       autoTradeEnabled: false,
-      tradeQuantity: '0.001',
+      tradeAmountUsdt: '100',
       tradeLeverage: 5,
-      tradeOncePerStart: true,
+      closeOnNeutral: false,
+      openPosition: null,
 
       setAutoTradeEnabled: (v) => set({ autoTradeEnabled: v }),
-      setTradeQuantity: (v) => set({ tradeQuantity: v }),
-      setTradeLeverage: (v) => set({ tradeLeverage: Math.max(1, Math.min(50, v)) }),
-      setTradeOncePerStart: (v) => set({ tradeOncePerStart: v }),
+      setTradeAmountUsdt: (v) => set({ tradeAmountUsdt: v }),
+      // SoDEX caps perps leverage at 25x — enforce here.
+      setTradeLeverage: (v) => set({ tradeLeverage: Math.max(1, Math.min(25, v)) }),
+      setCloseOnNeutral: (v) => set({ closeOnNeutral: v }),
+      setOpenPosition: (p) => set({ openPosition: p }),
 
       setCurrentPrediction: (direction, confidence, signals, price) =>
         set({
@@ -147,7 +170,7 @@ export const usePredictorStore = create<PredictorState>()(
         })),
 
       resetStats: () =>
-        set({ history: [], correct: 0, wrong: 0, skipped: 0, currentPrediction: 'NEUTRAL', currentConfidence: 0, currentSignals: null, cycleStartTime: null, entryPrice: null }),
+        set({ history: [], correct: 0, wrong: 0, skipped: 0, currentPrediction: 'NEUTRAL', currentConfidence: 0, currentSignals: null, cycleStartTime: null, entryPrice: null, openPosition: null }),
     }),
     {
       name: 'predictor-store-v2',
@@ -157,9 +180,10 @@ export const usePredictorStore = create<PredictorState>()(
         wrong: s.wrong,
         skipped: s.skipped,
         autoTradeEnabled: s.autoTradeEnabled,
-        tradeQuantity: s.tradeQuantity,
+        tradeAmountUsdt: s.tradeAmountUsdt,
         tradeLeverage: s.tradeLeverage,
-        tradeOncePerStart: s.tradeOncePerStart,
+        closeOnNeutral: s.closeOnNeutral,
+        openPosition: s.openPosition,
       }),
     },
   ),

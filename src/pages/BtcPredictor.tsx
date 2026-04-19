@@ -320,8 +320,9 @@ export const BtcPredictor: React.FC = () => {
     cycleStartTime, entryPrice,
     history, correct, wrong, skipped,
     setCurrentPrediction, resolvePrediction, addHistoryEntry, resetStats,
-    autoTradeEnabled, tradeQuantity, tradeLeverage, tradeOncePerStart,
-    setAutoTradeEnabled, setTradeQuantity, setTradeLeverage, setTradeOncePerStart,
+    autoTradeEnabled, tradeAmountUsdt, tradeLeverage, closeOnNeutral,
+    setAutoTradeEnabled, setTradeAmountUsdt, setTradeLeverage, setCloseOnNeutral,
+    openPosition, setOpenPosition,
   } = usePredictorStore();
 
   const [isRunning, setIsRunning] = useState(false);
@@ -333,9 +334,6 @@ export const BtcPredictor: React.FC = () => {
   const isRunningRef     = useRef(false);
   const cycleTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resolveTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Tracks whether we've already placed an order during this Start session
-  // (used by tradeOncePerStart mode).
-  const hasOrderedThisRunRef = useRef(false);
 
   useEffect(() => { btcPriceRef.current  = btcPrice;  }, [btcPrice]);
   useEffect(() => { btcSymbolRef.current = btcSymbol; }, [btcSymbol]); // keep ref in sync
@@ -463,33 +461,84 @@ export const BtcPredictor: React.FC = () => {
 
   // ── Trade-settings refs (so the cycle reads latest values reactively) ──
   const autoTradeEnabledRef = useRef(autoTradeEnabled);
-  const tradeQuantityRef    = useRef(tradeQuantity);
+  const tradeAmountUsdtRef  = useRef(tradeAmountUsdt);
   const tradeLeverageRef    = useRef(tradeLeverage);
-  const tradeOncePerStartRef = useRef(tradeOncePerStart);
-  useEffect(() => { autoTradeEnabledRef.current  = autoTradeEnabled;  }, [autoTradeEnabled]);
-  useEffect(() => { tradeQuantityRef.current     = tradeQuantity;     }, [tradeQuantity]);
-  useEffect(() => { tradeLeverageRef.current     = tradeLeverage;     }, [tradeLeverage]);
-  useEffect(() => { tradeOncePerStartRef.current = tradeOncePerStart; }, [tradeOncePerStart]);
+  const closeOnNeutralRef   = useRef(closeOnNeutral);
+  const openPositionRef     = useRef(openPosition);
+  useEffect(() => { autoTradeEnabledRef.current = autoTradeEnabled; }, [autoTradeEnabled]);
+  useEffect(() => { tradeAmountUsdtRef.current  = tradeAmountUsdt;  }, [tradeAmountUsdt]);
+  useEffect(() => { tradeLeverageRef.current    = tradeLeverage;    }, [tradeLeverage]);
+  useEffect(() => { closeOnNeutralRef.current   = closeOnNeutral;   }, [closeOnNeutral]);
+  useEffect(() => { openPositionRef.current     = openPosition;     }, [openPosition]);
 
   /**
-   * Place a market order on the active perps symbol matching the predicted
-   * direction. UP → BUY (long), DOWN → SELL (short). Sets leverage first.
-   * Errors are caught and surfaced via toast — they never crash the cycle.
+   * Close the bot-managed open position with a reduce-only market order
+   * in the opposite direction. Clears `openPosition` from the store on
+   * success. Returns true if a close was attempted.
+   */
+  const closePredictorPosition = useCallback(async (reason: string): Promise<boolean> => {
+    const pos = openPositionRef.current;
+    if (!pos) return false;
+    try {
+      await placeOrder(
+        {
+          symbol: pos.symbol,
+          side: pos.side === 'LONG' ? 2 : 1,   // opposite side
+          type: 2,                              // MARKET
+          quantity: pos.quantity.toString(),
+          reduceOnly: true,
+        },
+        'perps',
+      );
+      const exitPrice = btcPriceRef.current;
+      const pnlUsdt = exitPrice > 0
+        ? (exitPrice - pos.entryPrice) * pos.quantity * (pos.side === 'LONG' ? 1 : -1)
+        : 0;
+      toast.success(
+        `Closed ${pos.side} ${pos.quantity.toFixed(4)} ${pos.symbol}`
+        + (exitPrice > 0 ? ` — PnL ${pnlUsdt >= 0 ? '+' : ''}${pnlUsdt.toFixed(2)} USDT` : '')
+        + ` (${reason})`,
+      );
+      setOpenPosition(null);
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Close failed: ${msg}`);
+      return false;
+    }
+  }, [setOpenPosition]);
+
+  /**
+   * Place a market order matching the predicted direction.
+   * Quantity is computed from the user-supplied USDT notional and the
+   * current BTC price: `qty = notional / btcPrice`. Sets leverage first,
+   * then submits the order. On success, records the position so a future
+   * close-on-direction-change can target it. Errors are toasted, never
+   * thrown.
    */
   const placePredictorOrder = useCallback(async (direction: PredictionDirection): Promise<void> => {
     if (direction === 'NEUTRAL') return;
     const symbol = btcSymbolRef.current;
-    const qty    = tradeQuantityRef.current;
+    const usdtStr = tradeAmountUsdtRef.current;
     const lev    = tradeLeverageRef.current;
+    const price  = btcPriceRef.current;
     if (!symbol) {
       toast.error('Auto-trade: BTC symbol not resolved yet');
       return;
     }
-    const qtyNum = parseFloat(qty);
-    if (!Number.isFinite(qtyNum) || qtyNum <= 0) {
-      toast.error(`Auto-trade: invalid quantity "${qty}"`);
+    const usdtNum = parseFloat(usdtStr);
+    if (!Number.isFinite(usdtNum) || usdtNum <= 0) {
+      toast.error(`Auto-trade: invalid USDT amount "${usdtStr}"`);
       return;
     }
+    if (price <= 0) {
+      toast.error('Auto-trade: BTC price unavailable');
+      return;
+    }
+    // Convert USDT notional → BTC quantity. Round to 4 decimals which is
+    // safely within typical SoDEX BTC step size (0.0001). Exchange will
+    // re-round if needed via placePerpsOrder normalisation.
+    const qtyBtc = Math.max(0.0001, +(usdtNum / price).toFixed(4));
     try {
       // 1. Set leverage (server may reject if open orders/positions exist —
       //    we surface but still attempt the order).
@@ -505,18 +554,28 @@ export const BtcPredictor: React.FC = () => {
           symbol,
           side: direction === 'UP' ? 1 : 2,  // 1=BUY, 2=SELL
           type: 2,                            // 2=MARKET
-          quantity: qty,
+          quantity: qtyBtc.toString(),
         },
         'perps',
       );
+      // 3. Record the new open position
+      setOpenPosition({
+        symbol,
+        side: direction === 'UP' ? 'LONG' : 'SHORT',
+        quantity: qtyBtc,
+        notionalUsdt: usdtNum,
+        entryPrice: price,
+        leverage: lev,
+        openedAt: Date.now(),
+      });
       toast.success(
-        `Order placed: ${direction === 'UP' ? 'LONG' : 'SHORT'} ${qty} ${symbol} @ ${lev}x`,
+        `${direction === 'UP' ? 'LONG' : 'SHORT'} ${qtyBtc} ${symbol} @ ${lev}x (${usdtNum} USDT)`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       toast.error(`Auto-trade failed: ${msg}`);
     }
-  }, []);
+  }, [setOpenPosition]);
 
   const runPredictionCycle = useCallback(async () => {
     if (!isRunningRef.current) return;
@@ -660,14 +719,29 @@ export const BtcPredictor: React.FC = () => {
           : `↑ ${direction} predicted (score ${score.toFixed(3)}, ${agreementCount}/${totalSignals} signals agree) — resolving in 5 min…`,
       );
 
-      // 6.5. Auto-trade: place market order if enabled
-      if (direction !== 'NEUTRAL' && autoTradeEnabledRef.current) {
-        const onceMode = tradeOncePerStartRef.current;
-        if (!onceMode || !hasOrderedThisRunRef.current) {
-          hasOrderedThisRunRef.current = true;
-          // Fire-and-forget — don't block the cycle on order completion.
+      // 6.5. Auto-trade: manage open position based on the new prediction
+      if (autoTradeEnabledRef.current) {
+        const pos = openPositionRef.current;
+        const desiredSide: 'LONG' | 'SHORT' | null =
+          direction === 'UP'   ? 'LONG'  :
+          direction === 'DOWN' ? 'SHORT' : null;
+
+        if (direction === 'NEUTRAL') {
+          // Only close on neutral if user opted in
+          if (pos && closeOnNeutralRef.current) {
+            void closePredictorPosition('neutral prediction');
+          }
+        } else if (!pos) {
+          // No position open — open one matching the prediction
           void placePredictorOrder(direction);
+        } else if (pos.side !== desiredSide) {
+          // Direction flipped — close then re-open in the new direction
+          void (async () => {
+            const closed = await closePredictorPosition(`${pos.side} → ${desiredSide}`);
+            if (closed) await placePredictorOrder(direction);
+          })();
         }
+        // else: same direction — keep the existing position
       }
 
       // 7. Schedule resolution after 5 minutes
@@ -699,7 +773,7 @@ export const BtcPredictor: React.FC = () => {
       if (cycleTimerRef.current) clearTimeout(cycleTimerRef.current);
       cycleTimerRef.current = setTimeout(runPredictionCycle, CYCLE_MS);
     }
-  }, [fetchNewsSentiment, fetchEtfSignal, setCurrentPrediction, addHistoryEntry, resolvePrediction, placePredictorOrder]);
+  }, [fetchNewsSentiment, fetchEtfSignal, setCurrentPrediction, addHistoryEntry, resolvePrediction, placePredictorOrder, closePredictorPosition]);
 
   const handleStart = useCallback(() => {
     if (!sosoApiKey) {
@@ -707,8 +781,6 @@ export const BtcPredictor: React.FC = () => {
     }
     isRunningRef.current = true;
     setIsRunning(true);
-    // New session — reset the once-per-start order flag
-    hasOrderedThisRunRef.current = false;
     setStatusMsg('Starting first prediction cycle…');
 
     // Restore timers for any PENDING predictions (in case we stopped then restarted)
@@ -940,8 +1012,8 @@ export const BtcPredictor: React.FC = () => {
               <div className="text-sm font-bold text-text-primary">Auto-Trade</div>
               <div className="text-[10px] text-text-muted">
                 {autoTradeEnabled
-                  ? `Will ${tradeOncePerStart ? 'open one trade per Start' : 'trade every prediction'}`
-                  : 'Place an order with the prediction'}
+                  ? `Closes & re-opens on direction change${closeOnNeutral ? ' • closes on NEUTRAL' : ''}`
+                  : 'Open a position with the prediction (close on flip)'}
               </div>
             </div>
             <label className="relative inline-flex items-center cursor-pointer ml-auto">
@@ -958,17 +1030,24 @@ export const BtcPredictor: React.FC = () => {
 
           {autoTradeEnabled && (
             <>
-              <div className="flex flex-col gap-1 min-w-[140px]">
-                <label className="text-[10px] text-text-muted uppercase tracking-wider">Quantity (BTC)</label>
+              <div className="flex flex-col gap-1 min-w-[160px]">
+                <label className="text-[10px] text-text-muted uppercase tracking-wider flex items-center justify-between">
+                  <span>Amount (USDT)</span>
+                  {btcPrice > 0 && parseFloat(tradeAmountUsdt) > 0 && (
+                    <span className="font-mono text-text-muted">
+                      ≈ {(parseFloat(tradeAmountUsdt) / btcPrice).toFixed(4)} BTC
+                    </span>
+                  )}
+                </label>
                 <input
                   type="number"
-                  step="0.001"
+                  step="10"
                   min="0"
-                  value={tradeQuantity}
-                  onChange={(e) => setTradeQuantity(e.target.value)}
+                  value={tradeAmountUsdt}
+                  onChange={(e) => setTradeAmountUsdt(e.target.value)}
                   disabled={isRunning}
                   className="bg-surface border border-border rounded-lg px-3 py-1.5 text-sm font-mono text-text-primary focus:outline-none focus:border-primary disabled:opacity-50"
-                  placeholder="0.001"
+                  placeholder="100"
                 />
               </div>
 
@@ -980,24 +1059,27 @@ export const BtcPredictor: React.FC = () => {
                 <input
                   type="range"
                   min={1}
-                  max={50}
+                  max={25}
                   step={1}
                   value={tradeLeverage}
                   onChange={(e) => setTradeLeverage(parseInt(e.target.value, 10))}
                   disabled={isRunning}
                   className="accent-amber-500 disabled:opacity-50"
                 />
+                <div className="flex justify-between text-[9px] text-text-muted font-mono">
+                  <span>1x</span><span>25x (SoDEX max)</span>
+                </div>
               </div>
 
               <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={tradeOncePerStart}
-                  onChange={(e) => setTradeOncePerStart(e.target.checked)}
+                  checked={closeOnNeutral}
+                  onChange={(e) => setCloseOnNeutral(e.target.checked)}
                   disabled={isRunning}
                   className="accent-amber-500"
                 />
-                <span>One order per Start</span>
+                <span>Close on NEUTRAL</span>
               </label>
             </>
           )}
@@ -1006,12 +1088,87 @@ export const BtcPredictor: React.FC = () => {
           <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/5 border border-amber-500/20 text-[11px] text-amber-300/90">
             <AlertTriangle size={12} className="shrink-0 mt-0.5" />
             <span>
-              <strong>Live trading.</strong> When the predictor produces UP, it places a market BUY (long); DOWN places a market SELL (short).
-              Leverage is applied via <code>updateLeverage</code> before each order. Disable to run signal-only.
+              <strong>Live trading.</strong> UP → market BUY (long), DOWN → market SELL (short).
+              When the prediction flips, the bot closes the existing position with a reduce-only order before opening the new one.
+              Leverage is applied via <code>updateLeverage</code> per order.
             </span>
           </div>
         )}
       </Card>
+
+      {/* ── Bot-managed open position panel ── */}
+      {openPosition && (
+        <Card className={cn(
+          'p-4 border-2',
+          openPosition.side === 'LONG'
+            ? 'border-emerald-500/40 bg-emerald-500/5'
+            : 'border-red-500/40 bg-red-500/5',
+        )}>
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            <div className="flex items-center gap-3">
+              <div className={cn(
+                'w-10 h-10 rounded-xl flex items-center justify-center',
+                openPosition.side === 'LONG' ? 'bg-emerald-500/20' : 'bg-red-500/20',
+              )}>
+                {openPosition.side === 'LONG'
+                  ? <TrendingUp size={20} className="text-emerald-400" />
+                  : <TrendingDown size={20} className="text-red-400" />}
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className={cn(
+                    'text-sm font-bold',
+                    openPosition.side === 'LONG' ? 'text-emerald-400' : 'text-red-400',
+                  )}>
+                    {openPosition.side}
+                  </span>
+                  <span className="text-text-primary font-mono font-semibold">
+                    {openPosition.quantity.toFixed(4)} {openPosition.symbol}
+                  </span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-mono">
+                    {openPosition.leverage}x
+                  </span>
+                </div>
+                <div className="text-[10px] text-text-muted mt-0.5">
+                  Opened {new Date(openPosition.openedAt).toLocaleTimeString()} • entry ${openPosition.entryPrice.toFixed(2)} • notional {openPosition.notionalUsdt} USDT
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4">
+              {btcPrice > 0 && (() => {
+                const dir = openPosition.side === 'LONG' ? 1 : -1;
+                const pnlUsdt = (btcPrice - openPosition.entryPrice) * openPosition.quantity * dir;
+                const pnlPct  = ((btcPrice - openPosition.entryPrice) / openPosition.entryPrice) * 100 * dir;
+                const positive = pnlUsdt >= 0;
+                return (
+                  <div className="flex flex-col items-end">
+                    <span className={cn(
+                      'text-lg font-bold font-mono',
+                      positive ? 'text-emerald-400' : 'text-red-400',
+                    )}>
+                      {positive ? '+' : ''}{pnlUsdt.toFixed(2)} USDT
+                    </span>
+                    <span className={cn(
+                      'text-[10px] font-mono',
+                      positive ? 'text-emerald-400/70' : 'text-red-400/70',
+                    )}>
+                      {positive ? '+' : ''}{pnlPct.toFixed(3)}%
+                    </span>
+                  </div>
+                );
+              })()}
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() => void closePredictorPosition('manual close')}
+              >
+                Close Position
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Main layout: 2/3 left + 1/3 right */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
