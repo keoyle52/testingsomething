@@ -2,7 +2,7 @@ import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { 
   LayoutDashboard, Grid2X2, Clock, Repeat, Users, LineChart, Coins, 
-  TimerOff, Bell, FlaskConical, Settings, Zap, BarChart2, Newspaper, Bot, Wrench
+  TimerOff, Bell, FlaskConical, Settings, Zap, BarChart2, Newspaper, Bot, Wrench, Brain
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -48,6 +48,14 @@ const NAV_MENU = [
       { to: '/copy-trader', icon: Users, label: 'Copy Trader' },
       { to: '/alerts', icon: Bell, label: 'Price Alerts' },
       { to: '/backtesting', icon: FlaskConical, label: 'Backtesting' },
+    ]
+  },
+  {
+    groupId: 'ai',
+    icon: Brain,
+    label: 'AI Tools',
+    items: [
+      { to: '/btc-predictor', icon: Brain, label: 'BTC Predictor' },
     ]
   }
 ];

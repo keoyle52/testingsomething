@@ -42,6 +42,7 @@ const Backtesting  = lazyFrom(() => import('./pages/Backtesting').then(m => ({ d
 const EtfTracker   = lazyFrom(() => import('./pages/EtfTracker').then(m => ({ default: m.EtfTracker })), 'EtfTracker');
 const CryptoNews   = lazyFrom(() => import('./pages/CryptoNews').then(m => ({ default: m.CryptoNews })), 'CryptoNews');
 const NewsBot      = lazyFrom(() => import('./pages/NewsBot').then(m => ({ default: m.NewsBot })), 'NewsBot');
+const BtcPredictor = lazyFrom(() => import('./pages/BtcPredictor').then(m => ({ default: m.BtcPredictor })), 'BtcPredictor');
 
 /**
  * Non-blocking Suspense fallback — a subtle top progress shimmer instead of
@@ -149,6 +150,7 @@ function App() {
                       <Route path="/etf-tracker"     element={<EtfTracker />} />
                       <Route path="/news"            element={<CryptoNews />} />
                       <Route path="/news-bot"        element={<NewsBot />} />
+                      <Route path="/btc-predictor"   element={<BtcPredictor />} />
                       <Route path="*"                element={<Navigate to="/dashboard" replace />} />
                     </Routes>
                   </Suspense>
