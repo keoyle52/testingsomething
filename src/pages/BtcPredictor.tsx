@@ -948,6 +948,25 @@ export const BtcPredictor: React.FC = () => {
                 Start the predictor to see signal breakdown
               </div>
             )}
+            {/* Data source note */}
+            <div className="px-6 py-3 border-t border-white/5 flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span className="text-[10px] text-text-muted">Data sources:</span>
+              <span className="text-[10px] text-text-muted flex items-center gap-1">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400" />
+                <span className="text-blue-400 font-semibold">SoDEX</span>
+                &nbsp;— Order Book, Funding Rate, Klines (EMA · RSI · MACD · Microstructure)
+              </span>
+              <span className="text-[10px] text-text-muted flex items-center gap-1">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400" />
+                <span className="text-amber-400 font-semibold">SoSoValue</span>
+                &nbsp;— BTC ETF Flow, News Sentiment
+              </span>
+              <span className="text-[10px] text-text-muted flex items-center gap-1">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-yellow-300" />
+                <span className="text-yellow-300 font-semibold">Binance</span>
+                &nbsp;— Live BTC price feed
+              </span>
+            </div>
           </Card>
         </div>
 
