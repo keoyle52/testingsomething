@@ -591,6 +591,40 @@ export const BtcPredictor: React.FC = () => {
         </div>
       </div>
 
+      {/* ── Price bar — always visible ── */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="flex flex-col items-center justify-center gap-1 px-4 py-3 rounded-xl bg-surface border border-border">
+          <span className="text-[10px] text-text-muted uppercase tracking-widest">Entry Price</span>
+          <span className="text-lg font-bold font-mono text-text-primary">
+            {entryPrice && entryPrice > 0
+              ? `$${entryPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : '—'}
+          </span>
+        </div>
+        <div className="flex flex-col items-center justify-center gap-1 px-4 py-3 rounded-xl bg-surface border border-primary/30 shadow-[0_0_12px_rgba(0,225,255,0.08)]">
+          <span className="text-[10px] text-text-muted uppercase tracking-widest">Live BTC</span>
+          <span className="text-lg font-bold font-mono text-primary">
+            {btcPrice > 0
+              ? `$${btcPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : <span className="text-text-muted text-sm">Connecting…</span>}
+          </span>
+        </div>
+        <div className="flex flex-col items-center justify-center gap-1 px-4 py-3 rounded-xl bg-surface border border-border">
+          <span className="text-[10px] text-text-muted uppercase tracking-widest">Δ Since Entry</span>
+          {entryPrice && entryPrice > 0 && btcPrice > 0 ? (() => {
+            const pct = ((btcPrice - entryPrice) / entryPrice) * 100;
+            return (
+              <span className={cn(
+                'text-lg font-bold font-mono',
+                pct > 0 ? 'text-emerald-400' : pct < 0 ? 'text-red-400' : 'text-text-muted',
+              )}>
+                {pct >= 0 ? '+' : ''}{pct.toFixed(3)}%
+              </span>
+            );
+          })() : <span className="text-lg font-bold font-mono text-text-muted">—</span>}
+        </div>
+      </div>
+
       {/* Status bar */}
       <div className={cn(
         'flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm border',
@@ -665,7 +699,7 @@ export const BtcPredictor: React.FC = () => {
               {/* Countdown */}
               <CountdownTimer cycleStartTime={cycleStartTime} />
 
-              {/* Score gauge + price info */}
+              {/* Score gauge */}
               <div className="flex flex-col items-center gap-3">
                 <div className="flex flex-col items-center gap-1">
                   <div className="text-xs text-text-muted uppercase tracking-wide">Weighted Score</div>
@@ -678,41 +712,6 @@ export const BtcPredictor: React.FC = () => {
                   </div>
                   <div className="text-[10px] text-text-muted">threshold ±0.1</div>
                 </div>
-
-                {/* Price block */}
-                <div className="w-full rounded-xl bg-white/[0.04] border border-white/8 px-4 py-3 flex flex-col gap-2 min-w-[160px]">
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="text-[11px] text-text-muted uppercase tracking-wide">Entry</span>
-                    <span className="text-sm font-bold font-mono text-text-primary">
-                      {entryPrice && entryPrice > 0
-                        ? `$${entryPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                        : '—'}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="text-[11px] text-text-muted uppercase tracking-wide">Live</span>
-                    <span className="text-sm font-bold font-mono text-primary">
-                      {btcPrice > 0
-                        ? `$${btcPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                        : '—'}
-                    </span>
-                  </div>
-                  {entryPrice && entryPrice > 0 && btcPrice > 0 && (() => {
-                    const pct = ((btcPrice - entryPrice) / entryPrice) * 100;
-                    return (
-                      <div className="flex items-center justify-between gap-4 pt-1 border-t border-white/8">
-                        <span className="text-[11px] text-text-muted uppercase tracking-wide">Δ</span>
-                        <span className={cn(
-                          'text-sm font-bold font-mono',
-                          pct > 0 ? 'text-emerald-400' : pct < 0 ? 'text-red-400' : 'text-text-muted',
-                        )}>
-                          {pct >= 0 ? '+' : ''}{pct.toFixed(3)}%
-                        </span>
-                      </div>
-                    );
-                  })()}
-                </div>
-
                 {signals && (
                   <div className="flex items-center gap-3 text-[11px] text-text-muted">
                     <span className="flex items-center gap-1">
