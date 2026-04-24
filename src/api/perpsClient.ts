@@ -53,11 +53,17 @@ perpsClient.interceptors.request.use(async (config) => {
       config.headers['X-API-Sign'] = signature;
 
       // Diagnostic: show the exact key/network used (helps debug
-      // "api key not found" on testnet). Only logs on writes.
+      // "api key not found" on testnet). Visible in DevTools by default.
       if (typeof window !== 'undefined') {
-        console.debug(
-          `[perpsClient] ${method} ${config.url} → ${isTestnet ? 'TESTNET' : 'MAINNET'}`
-          + ` X-API-Key=${effectiveApiKey} action=${actionType}`,
+        // Use console.log (not debug) so it shows without filter changes.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[perpsClient] %c${isTestnet ? 'TESTNET' : 'MAINNET'}%c ${method} ${config.url}`
+          + `\n  X-API-Key  = ${effectiveApiKey}`
+          + `\n  X-API-Nonce= ${nonce}`
+          + `\n  action     = ${actionType}`,
+          isTestnet ? 'color:#fbbf24;font-weight:bold' : 'color:#22d3ee;font-weight:bold',
+          'color:inherit',
         );
       }
     } catch (error) {
@@ -80,8 +86,14 @@ perpsClient.interceptors.response.use(
       ?? (typeof data === 'string' ? data : null)
       ?? error?.message;
     if (msg && typeof msg === 'string') {
-      // Replace the generic axios error with the actual backend reason
-      error.message = msg;
+      const lower = msg.toLowerCase();
+      const isTestnet = useSettingsStore.getState().isTestnet;
+      // Add a registration hint when the backend reports a missing key.
+      if (lower.includes('api key not found') || lower.includes('apikey not found')) {
+        error.message = `${msg} — register an API key for this address at ${isTestnet ? 'testnet.sodex.com' : 'sodex.com'} → Settings → API Keys, then paste its name in Settings → ${isTestnet ? 'Testnet' : 'Mainnet'} Credentials.`;
+      } else {
+        error.message = msg;
+      }
     }
     return Promise.reject(error);
   },

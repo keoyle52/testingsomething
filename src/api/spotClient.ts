@@ -53,9 +53,14 @@ spotClient.interceptors.request.use(async (config) => {
       config.headers['X-API-Sign'] = signature;
 
       if (typeof window !== 'undefined') {
-        console.debug(
-          `[spotClient] ${method} ${config.url} → ${isTestnet ? 'TESTNET' : 'MAINNET'}`
-          + ` X-API-Key=${effectiveApiKey} action=${actionType}`,
+        // eslint-disable-next-line no-console
+        console.log(
+          `[spotClient] %c${isTestnet ? 'TESTNET' : 'MAINNET'}%c ${method} ${config.url}`
+          + `\n  X-API-Key  = ${effectiveApiKey}`
+          + `\n  X-API-Nonce= ${nonce}`
+          + `\n  action     = ${actionType}`,
+          isTestnet ? 'color:#fbbf24;font-weight:bold' : 'color:#22d3ee;font-weight:bold',
+          'color:inherit',
         );
       }
     } catch (error) {
@@ -75,7 +80,13 @@ spotClient.interceptors.response.use(
       ?? (typeof data === 'string' ? data : null)
       ?? error?.message;
     if (msg && typeof msg === 'string') {
-      error.message = msg;
+      const lower = msg.toLowerCase();
+      const isTestnet = useSettingsStore.getState().isTestnet;
+      if (lower.includes('api key not found') || lower.includes('apikey not found')) {
+        error.message = `${msg} — register an API key at ${isTestnet ? 'testnet.sodex.com' : 'sodex.com'} → Settings → API Keys, then paste its name in Settings → ${isTestnet ? 'Testnet' : 'Mainnet'} Credentials.`;
+      } else {
+        error.message = msg;
+      }
     }
     return Promise.reject(error);
   },

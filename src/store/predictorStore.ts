@@ -69,6 +69,11 @@ interface PredictorState {
   tradeLeverage: number;
   /** When true, on a NEUTRAL prediction the open position is also closed. */
   closeOnNeutral: boolean;
+  /** When true, at the start of every new prediction cycle the existing
+   *  position is closed and a fresh one is opened in the new direction —
+   *  even if the direction is unchanged. Primary use-case: volume farming
+   *  for airdrop eligibility. Costs 2x taker fees per cycle. */
+  renewEveryCycle: boolean;
 
   // ── Currently open bot-managed position ──
   openPosition: OpenPosition | null;
@@ -82,6 +87,7 @@ interface PredictorState {
   setTradeAmountUsdt: (v: string) => void;
   setTradeLeverage: (v: number) => void;
   setCloseOnNeutral: (v: boolean) => void;
+  setRenewEveryCycle: (v: boolean) => void;
   setOpenPosition: (p: OpenPosition | null) => void;
 }
 
@@ -119,6 +125,7 @@ export const usePredictorStore = create<PredictorState>()(
       tradeAmountUsdt: '100',
       tradeLeverage: 5,
       closeOnNeutral: false,
+      renewEveryCycle: false,
       openPosition: null,
 
       setAutoTradeEnabled: (v) => set({ autoTradeEnabled: v }),
@@ -126,6 +133,7 @@ export const usePredictorStore = create<PredictorState>()(
       // SoDEX caps perps leverage at 25x — enforce here.
       setTradeLeverage: (v) => set({ tradeLeverage: Math.max(1, Math.min(25, v)) }),
       setCloseOnNeutral: (v) => set({ closeOnNeutral: v }),
+      setRenewEveryCycle: (v) => set({ renewEveryCycle: v }),
       setOpenPosition: (p) => set({ openPosition: p }),
 
       setCurrentPrediction: (direction, confidence, signals, price) =>
@@ -183,6 +191,7 @@ export const usePredictorStore = create<PredictorState>()(
         tradeAmountUsdt: s.tradeAmountUsdt,
         tradeLeverage: s.tradeLeverage,
         closeOnNeutral: s.closeOnNeutral,
+        renewEveryCycle: s.renewEveryCycle,
         openPosition: s.openPosition,
       }),
     },

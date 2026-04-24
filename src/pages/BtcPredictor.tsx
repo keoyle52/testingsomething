@@ -320,8 +320,8 @@ export const BtcPredictor: React.FC = () => {
     cycleStartTime, entryPrice,
     history, correct, wrong, skipped,
     setCurrentPrediction, resolvePrediction, addHistoryEntry, resetStats,
-    autoTradeEnabled, tradeAmountUsdt, tradeLeverage, closeOnNeutral,
-    setAutoTradeEnabled, setTradeAmountUsdt, setTradeLeverage, setCloseOnNeutral,
+    autoTradeEnabled, tradeAmountUsdt, tradeLeverage, closeOnNeutral, renewEveryCycle,
+    setAutoTradeEnabled, setTradeAmountUsdt, setTradeLeverage, setCloseOnNeutral, setRenewEveryCycle,
     openPosition, setOpenPosition,
   } = usePredictorStore();
 
@@ -464,11 +464,13 @@ export const BtcPredictor: React.FC = () => {
   const tradeAmountUsdtRef  = useRef(tradeAmountUsdt);
   const tradeLeverageRef    = useRef(tradeLeverage);
   const closeOnNeutralRef   = useRef(closeOnNeutral);
+  const renewEveryCycleRef  = useRef(renewEveryCycle);
   const openPositionRef     = useRef(openPosition);
   useEffect(() => { autoTradeEnabledRef.current = autoTradeEnabled; }, [autoTradeEnabled]);
   useEffect(() => { tradeAmountUsdtRef.current  = tradeAmountUsdt;  }, [tradeAmountUsdt]);
   useEffect(() => { tradeLeverageRef.current    = tradeLeverage;    }, [tradeLeverage]);
   useEffect(() => { closeOnNeutralRef.current   = closeOnNeutral;   }, [closeOnNeutral]);
+  useEffect(() => { renewEveryCycleRef.current  = renewEveryCycle;  }, [renewEveryCycle]);
   useEffect(() => { openPositionRef.current     = openPosition;     }, [openPosition]);
 
   /**
@@ -618,15 +620,24 @@ export const BtcPredictor: React.FC = () => {
       try {
         const rates = await fetchFundingRates() as Record<string, unknown>[];
         const sym = btcSymbolRef.current.toUpperCase();
-        const row = rates.find((r) =>
-          String(r.symbol ?? r.s ?? r.symbolName ?? '').toUpperCase() === sym ||
-          String(r.symbol ?? '').toUpperCase().includes('BTC'),
+        // Prefer exact symbol match; only fall back to "contains BTC" when
+        // no exact hit is found, otherwise we might grab ETHBTC or similar.
+        const exactRow = rates.find((r) =>
+          String(r.symbol ?? r.s ?? r.symbolName ?? '').toUpperCase() === sym,
         );
+        const row = exactRow ?? rates.find((r) => {
+          const s = String(r.symbol ?? '').toUpperCase();
+          return s.startsWith('BTC') && (s.includes('USD') || s.includes('USDC'));
+        });
         if (row) {
           const raw = row.fundingRate ?? row.funding_rate ?? row.fr ?? row.rate ?? row.f;
           frRate = raw !== undefined ? parseFloat(String(raw)) : 0;
+        } else {
+          console.warn('[BtcPredictor] No funding rate row matched symbol', sym, '— got', rates.length, 'rows');
         }
-      } catch { /* keep 0 */ }
+      } catch (err) {
+        console.warn('[BtcPredictor] fetchFundingRates failed:', err);
+      }
       let frSignal = 0;
       const prevFr = prevFundingRef.current;
       if (frRate > 0.0001) frSignal = -1;
@@ -740,8 +751,16 @@ export const BtcPredictor: React.FC = () => {
             const closed = await closePredictorPosition(`${pos.side} → ${desiredSide}`);
             if (closed) await placePredictorOrder(direction);
           })();
+        } else if (renewEveryCycleRef.current) {
+          // Same direction, but user opted to renew every cycle (volume
+          // farming for airdrop eligibility). Close the existing position
+          // and re-open in the same direction to generate fresh volume.
+          void (async () => {
+            const closed = await closePredictorPosition(`renew ${pos.side} for volume`);
+            if (closed) await placePredictorOrder(direction);
+          })();
         }
-        // else: same direction — keep the existing position
+        // else: same direction and renew disabled — keep the existing position
       }
 
       // 7. Schedule resolution after 5 minutes
@@ -1080,6 +1099,17 @@ export const BtcPredictor: React.FC = () => {
                   className="accent-amber-500"
                 />
                 <span>Close on NEUTRAL</span>
+              </label>
+
+              <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer" title="Every 5-min cycle, close and re-open the position even if direction is unchanged. Doubles taker fees but generates 2x volume — useful for airdrop eligibility.">
+                <input
+                  type="checkbox"
+                  checked={renewEveryCycle}
+                  onChange={(e) => setRenewEveryCycle(e.target.checked)}
+                  disabled={isRunning}
+                  className="accent-amber-500"
+                />
+                <span>Renew position every cycle <span className="text-text-muted">(volume farming)</span></span>
               </label>
             </>
           )}

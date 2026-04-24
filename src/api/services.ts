@@ -744,8 +744,20 @@ export async function fetchMarkPrices() {
 
 export async function fetchFundingRates() {
   if (isDemo()) return getDemoFundingRates();
-  const res = await withRetry(() => perpsClient.get('/markets/funding-rates'));
-  return res?.data ?? res ?? [];
+  // SoDEX exposes funding rate as part of the tickers payload (fundingRate +
+  // nextFundingTime per symbol). There is no reliable standalone
+  // `/markets/funding-rates` endpoint, so derive from tickers — the same
+  // source FundingTracker uses.
+  const tickers = await fetchTickers('perps') as Record<string, unknown>[];
+  const arr = Array.isArray(tickers) ? tickers : [];
+  return arr
+    .filter((t) => t.fundingRate != null)
+    .map((t) => ({
+      symbol: t.symbol,
+      fundingRate: t.fundingRate,
+      nextFundingTime: t.nextFundingTime,
+      markPrice: t.markPrice ?? t.lastPrice,
+    }));
 }
 
 // ---------- Account (Private) ----------
