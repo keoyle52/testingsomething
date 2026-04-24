@@ -14,10 +14,13 @@ export interface SignalSnapshot {
   etfFallback?: boolean;            // true when SoSoValue ETF was unavailable
   // Order book
   orderBookImbalance: number;   // raw ratio bid/(bid+ask)
-  orderBookSignal: number;      // -1 / 0 / +1
+  orderBookSignal: number;      // -1 to +1 (gradient, dynamic z-score based)
+  orderBookZScore?: number;     // z-score of current imbalance vs recent history
   // Funding rate
   fundingRate: number;          // raw value
-  fundingRateSignal: number;    // -1 / 0 / +1
+  fundingRateSignal: number;    // -1 to +1
+  fundingMomentum?: number;     // change rate between cycles
+  fundingMomentumSignal?: number; // -1 to +1
   // Price microstructure
   microstructureSignal: number; // -1 to +1
   volumeSpike: boolean;
@@ -26,6 +29,11 @@ export interface SignalSnapshot {
   rsiSignal: number;
   emaSignal: number;
   macdSignal: number;
+  // Multi-factor extensions
+  vwapDeviation?: number;       // raw % deviation from VWAP
+  vwapSignal?: number;          // -1 to +1 (mean-reversion)
+  rocSignal?: number;           // rate-of-change signal, -1 to +1
+  atrPct?: number;              // ATR as % of price (volatility regime)
   // Composite
   weightedScore: number;
   agreementCount: number;       // how many signals agree with direction
@@ -41,6 +49,11 @@ export interface PredictionEntry {
   exitPrice: number | null;
   result: PredictionResult;
   pricePct: number | null;     // actual % change after 5 min
+  /** Net % after entry+exit taker fees (leverage-free). Computed at
+   *  resolution. Positive = would have been profitable at 1x leverage. */
+  netPricePct?: number | null;
+  /** Taker fee rate snapshot used for net PnL computation (e.g. 0.0004). */
+  feeRateUsed?: number;
   signals: SignalSnapshot;
 }
 
@@ -90,6 +103,14 @@ interface PredictorState {
   setRenewEveryCycle: (v: boolean) => void;
   setOpenPosition: (p: OpenPosition | null) => void;
 }
+
+/**
+ * Round-trip taker fee rate used to compute the net-PnL metric. SoDEX
+ * Tier-1 perps taker = 0.04%. One cycle => entry + exit = 2x takerRate.
+ * Kept as a constant here so the store has no dependency on services.ts.
+ * Call sites may override by passing an explicit rate to resolvePrediction.
+ */
+export const DEFAULT_TAKER_FEE_RATE = 0.0004;
 
 /**
  * Snapshot of the position the predictor opened. Tracks just enough
@@ -161,9 +182,18 @@ export const usePredictorStore = create<PredictorState>()(
           result = pct < 0 ? 'CORRECT' : 'WRONG';
         }
 
+        // Compute net % after round-trip taker fees. Only meaningful for
+        // non-neutral trades — NEUTRAL predictions place no orders.
+        const feeRateUsed = DEFAULT_TAKER_FEE_RATE;
+        const netPricePct = entry.direction === 'NEUTRAL'
+          ? null
+          : (entry.direction === 'UP' ? pct : -pct) - 2 * feeRateUsed * 100;
+
         set((s) => ({
           history: s.history.map((e) =>
-            e.id === id ? { ...e, exitPrice, pricePct: pct, result } : e,
+            e.id === id
+              ? { ...e, exitPrice, pricePct: pct, result, netPricePct, feeRateUsed }
+              : e,
           ),
           correct: result === 'CORRECT' ? s.correct + 1 : s.correct,
           wrong:   result === 'WRONG'   ? s.wrong + 1   : s.wrong,
@@ -197,3 +227,41 @@ export const usePredictorStore = create<PredictorState>()(
     },
   ),
 );
+
+/**
+ * Derive aggregate net performance from the history window. Directional
+ * sign is baked into `netPricePct` so simple summation is correct.
+ */
+export function computeNetPerformance(history: PredictionEntry[]): {
+  tradesCount: number;
+  totalNetPct: number;
+  avgNetPct: number;
+  winRate: number;
+  bestNetPct: number;
+  worstNetPct: number;
+} {
+  const resolved = history.filter(
+    (e) => e.direction !== 'NEUTRAL'
+        && (e.result === 'CORRECT' || e.result === 'WRONG')
+        && typeof e.netPricePct === 'number',
+  );
+  if (resolved.length === 0) {
+    return { tradesCount: 0, totalNetPct: 0, avgNetPct: 0, winRate: 0, bestNetPct: 0, worstNetPct: 0 };
+  }
+  let total = 0, best = -Infinity, worst = Infinity, wins = 0;
+  for (const e of resolved) {
+    const net = e.netPricePct as number;
+    total += net;
+    if (net > best)  best  = net;
+    if (net < worst) worst = net;
+    if (net > 0) wins += 1;
+  }
+  return {
+    tradesCount: resolved.length,
+    totalNetPct: total,
+    avgNetPct: total / resolved.length,
+    winRate: wins / resolved.length,
+    bestNetPct: best,
+    worstNetPct: worst,
+  };
+}

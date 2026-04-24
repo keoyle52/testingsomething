@@ -11,6 +11,7 @@ import { analyzeSentiment } from '../api/geminiClient';
 import { useSettingsStore } from '../store/settingsStore';
 import {
   usePredictorStore,
+  computeNetPerformance,
   type PredictionDirection,
   type SignalSnapshot,
   type PredictionEntry,
@@ -28,20 +29,47 @@ const LS_NEWS_KEY   = 'predictor_news_cache';
 const LS_ETF_KEY    = 'predictor_etf_cache';
 const KLINES_LIMIT  = 40;               // enough for EMA-21 + microstructure
 const BTC_SYMBOL_HINT = 'BTC';        // substring match against fetchTickers result
-const NEUTRAL_BASE  = 0.08;             // default neutral threshold (lowered so normal market produces signals)
-const NEUTRAL_WIDE  = 0.14;             // self-correcting threshold when accuracy drops
+const NEUTRAL_WIDE  = 0.22;             // self-correcting threshold when accuracy drops
+const ORDERBOOK_HISTORY = 30;           // rolling window for dynamic imbalance z-score
+const MIN_CONVICTION_SIGNALS = 4;       // min non-neutral signals agreeing before a trade fires
 
-// ─── Weights (must sum to 1.0) ────────────────────────────────────────────────
+// ─── Weights ──────────────────────────────────────────────────────────────────
+// Designed for the 5-minute horizon, where technical momentum
+// dominates and slow macro signals (news / ETF flow) only add edge at
+// the margins.
+//   Tech cluster   = 0.55  — microstructure + ROC + EMA + MACD + RSI
+//   Flow + Sent.   = 0.27  — orderbook z-score + news + ETF
+//   Mean reversion = 0.08  — VWAP deviation
+//   Funding        = 0.10  — absolute rate + change momentum
+// Sum = 1.00
 const W = {
-  orderBook:      0.28,
-  fundingRate:    0.18,
-  news:           0.15,
-  microstructure: 0.14,
-  etf:            0.12,
-  ema:            0.07,
-  rsi:            0.04,
-  macd:           0.02,
+  microstructure:  0.18,
+  roc:             0.15,
+  ema:             0.12,
+  macd:            0.06,
+  rsi:             0.04,
+  orderBook:       0.12,
+  news:            0.08,
+  etf:             0.07,
+  vwap:            0.08,
+  fundingRate:     0.04,
+  fundingMomentum: 0.06,
 } as const;
+
+/**
+ * Volatility-adaptive neutral threshold. Low ATR → raise threshold to
+ * avoid firing on noise (fees would exceed expected move). High ATR →
+ * lower threshold because a weak composite score can still translate
+ * to a real move worth trading.
+ */
+function computeNeutralThreshold(atrPct: number, accuracyBelow45: boolean): number {
+  if (accuracyBelow45) return NEUTRAL_WIDE;
+  if (!Number.isFinite(atrPct) || atrPct <= 0) return 0.14;
+  if (atrPct < 0.15) return 0.18;   // very quiet → demand strong consensus
+  if (atrPct < 0.25) return 0.15;
+  if (atrPct < 0.35) return 0.12;
+  return 0.10;                       // active → smaller scores already actionable
+}
 
 // ─── Technical Indicator Helpers ─────────────────────────────────────────────
 function calcEMA(values: number[], period: number): number[] {
@@ -74,12 +102,33 @@ interface TechResult {
   rsi: number; rsiSignal: number;
   emaSignal: number; macdSignal: number;
   microstructureSignal: number; volumeSpike: boolean;
+  // Extended signals
+  vwapDeviation: number;   // (close - VWAP) / VWAP, raw ratio
+  vwapSignal: number;      // -1..+1, mean-reversion bias
+  rocSignal: number;       // -1..+1, momentum (trend-following)
+  atrPct: number;          // ATR as % of price (volatility regime)
 }
 
-function computeIndicators(klines: { close: number; volume: number }[]): TechResult {
+interface Kline {
+  close: number;
+  volume: number;
+  high?: number;
+  low?: number;
+}
+
+function computeIndicators(klines: Kline[]): TechResult {
   const closes  = klines.map((k) => Number(k.close));
   const volumes = klines.map((k) => Number(k.volume));
-  const empty: TechResult = { rsi: 50, rsiSignal: 0, emaSignal: 0, macdSignal: 0, microstructureSignal: 0, volumeSpike: false };
+  // Fallback: approximate high/low from close series when not supplied.
+  // This keeps ATR defined even if the kline endpoint returns a reduced
+  // payload.
+  const highs = klines.map((k, i) => Number(k.high ?? Math.max(k.close, klines[i - 1]?.close ?? k.close)));
+  const lows  = klines.map((k, i) => Number(k.low  ?? Math.min(k.close, klines[i - 1]?.close ?? k.close)));
+  const empty: TechResult = {
+    rsi: 50, rsiSignal: 0, emaSignal: 0, macdSignal: 0,
+    microstructureSignal: 0, volumeSpike: false,
+    vwapDeviation: 0, vwapSignal: 0, rocSignal: 0, atrPct: 0,
+  };
   if (closes.length < 5) return empty;
 
   const last = closes.length - 1;
@@ -144,7 +193,76 @@ function computeIndicators(klines: { close: number; volume: number }[]): TechRes
   const avg10v = volumes.slice(-11, -1).reduce((a, b) => a + b, 0) / Math.max(1, Math.min(10, volumes.length - 1));
   const volumeSpike = avg10v > 0 && recentVol > avg10v * 2;
 
-  return { rsi, rsiSignal, emaSignal, macdSignal, microstructureSignal, volumeSpike };
+  // VWAP — volume-weighted average price across the full kline window.
+  // Deviation expressed as ratio of current close; mean-reversion bias:
+  // price stretched far from VWAP tends to retrace within 5 min.
+  // Threshold 0.15% (≈ one typical 5-min BTC move) maps to ±1 signal.
+  let vwapDeviation = 0;
+  let vwapSignal = 0;
+  {
+    let pvSum = 0;
+    let vSum  = 0;
+    for (let i = 0; i < closes.length; i++) {
+      const typical = (highs[i] + lows[i] + closes[i]) / 3;
+      const v = volumes[i];
+      if (v > 0 && Number.isFinite(typical)) {
+        pvSum += typical * v;
+        vSum  += v;
+      }
+    }
+    if (vSum > 0) {
+      const vwap = pvSum / vSum;
+      vwapDeviation = vwap > 0 ? (closes[last] - vwap) / vwap : 0;
+      // Mean reversion: price above VWAP → expect down, below → expect up.
+      // Sign is inverted.
+      vwapSignal = Math.max(-1, Math.min(1, -vwapDeviation / 0.0015));
+    }
+  }
+
+  // ROC — blended rate-of-change over 5 and 15 one-minute bars. Trend
+  // following: sustained upward drift → positive signal. Scale factor
+  // 0.003 (0.3%) chosen as roughly one standard deviation of 5-min BTC
+  // moves under normal conditions.
+  let rocSignal = 0;
+  if (closes.length >= 16) {
+    const roc5  = (closes[last] - closes[last - 5])  / (closes[last - 5]  || 1);
+    const roc15 = (closes[last] - closes[last - 15]) / (closes[last - 15] || 1);
+    const blended = roc5 * 0.6 + roc15 * 0.4;
+    rocSignal = Math.max(-1, Math.min(1, blended / 0.003));
+  } else if (closes.length >= 6) {
+    const roc5 = (closes[last] - closes[last - 5]) / (closes[last - 5] || 1);
+    rocSignal = Math.max(-1, Math.min(1, roc5 / 0.003));
+  }
+
+  // ATR — Wilder-style true range averaged over 14 bars (or what's
+  // available). Expressed as a % of the current close so downstream
+  // logic can treat volatility rejim-agnostically.
+  let atrPct = 0;
+  if (closes.length >= 2) {
+    const period = Math.min(14, closes.length - 1);
+    let trSum = 0;
+    let count = 0;
+    for (let i = closes.length - period; i < closes.length; i++) {
+      if (i <= 0) continue;
+      const tr = Math.max(
+        highs[i] - lows[i],
+        Math.abs(highs[i] - closes[i - 1]),
+        Math.abs(lows[i]  - closes[i - 1]),
+      );
+      if (Number.isFinite(tr)) {
+        trSum += tr;
+        count += 1;
+      }
+    }
+    const atr = count > 0 ? trSum / count : 0;
+    atrPct = closes[last] > 0 ? (atr / closes[last]) * 100 : 0;
+  }
+
+  return {
+    rsi, rsiSignal, emaSignal, macdSignal,
+    microstructureSignal, volumeSpike,
+    vwapDeviation, vwapSignal, rocSignal, atrPct,
+  };
 }
 
 
@@ -180,18 +298,23 @@ const Sparkline: React.FC<{ values: (0 | 1)[]; size?: number }> = ({ values, siz
 
 // ─── Countdown timer ──────────────────────────────────────────────────────────
 const CountdownTimer: React.FC<{ cycleStartTime: number | null }> = ({ cycleStartTime }) => {
-  const [remaining, setRemaining] = useState(CYCLE_MS);
-
+  // Tick a 'now' state once per second rather than recomputing the
+  // derived remaining value inside the effect — avoids a synchronous
+  // setState on every cycleStartTime change (react-hooks/set-state-in-effect).
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!cycleStartTime) { setRemaining(CYCLE_MS); return; }
-    const tick = () => {
-      const elapsed = Date.now() - cycleStartTime;
-      setRemaining(Math.max(0, CYCLE_MS - elapsed));
-    };
-    tick();
-    const id = setInterval(tick, 1000);
+    if (!cycleStartTime) return;
+    // Interval-only update; no synchronous setState inside the effect body.
+    // `now` was seeded from `Date.now()` on mount so the first render is
+    // accurate, and subsequent cycleStartTime changes only delay the
+    // next tick by at most 1 second — imperceptible to the user.
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [cycleStartTime]);
+
+  const remaining = cycleStartTime
+    ? Math.max(0, CYCLE_MS - (now - cycleStartTime))
+    : CYCLE_MS;
 
   const secs  = Math.floor(remaining / 1000);
   const mins  = Math.floor(secs / 60);
@@ -362,7 +485,7 @@ export const BtcPredictor: React.FC = () => {
   }, []); // run once on mount
 
   // ── Klines cache ref — populated by cycle, reused by fallbacks ───────────
-  const klinesRef = useRef<{ close: number; volume: number }[]>([]);
+  const klinesRef = useRef<Kline[]>([]);
 
   // ── Fallback: news → mark-price vs SMA-10 momentum ────────────────────
   const newsFallbackScore = useCallback((): number => {
@@ -447,13 +570,25 @@ export const BtcPredictor: React.FC = () => {
 
   // ── Order book + funding via REST (fetched each cycle) ───────────────────
   const prevFundingRef = useRef(0);
+  // Rolling history of bid/(bid+ask) imbalance, used to derive a dynamic
+  // z-score so the orderbook signal is calibrated to the instrument's
+  // typical state (BTC often sits slightly bid-heavy) rather than fixed
+  // 0.35 / 0.65 cut-offs.
+  const obImbalanceHistoryRef = useRef<number[]>([]);
 
-  // ── Self-correcting neutral threshold ──────────────────────────────────
+  // ── Volatility-adaptive neutral threshold ────────────────────
+  // ATR is measured each cycle; the threshold widens when volatility
+  // is low (avoid trading on noise that fees would consume) and narrows
+  // when volatility is high (small composite scores still produce real
+  // moves). A fallback widening also fires when recent accuracy drops
+  // below 45% across the last 20 decided trades.
+  const [lastAtrPct, setLastAtrPct] = useState(0);
   const last20Decided = history.filter((e) => e.result === 'CORRECT' || e.result === 'WRONG').slice(0, 20);
   const acc20 = last20Decided.length >= 5
     ? last20Decided.filter((e) => e.result === 'CORRECT').length / last20Decided.length
     : null;
-  const neutralThreshold = (acc20 !== null && acc20 < 0.45) ? NEUTRAL_WIDE : NEUTRAL_BASE;
+  const accuracyBelow45 = acc20 !== null && acc20 < 0.45;
+  const neutralThreshold = computeNeutralThreshold(lastAtrPct, accuracyBelow45);
 
   // ── Run full prediction cycle ───────────────────────────────────────────
   const neutralThresholdRef = useRef(neutralThreshold);
@@ -589,16 +724,20 @@ export const BtcPredictor: React.FC = () => {
 
       // 1. Klines → technical indicators
       setStatusMsg('Fetching 1-min candles…');
-      let klines: { close: number; volume: number }[] = [];
+      let klines: Kline[] = [];
       try {
         const raw = await fetchKlines(btcSymbolRef.current, '1m', KLINES_LIMIT, 'perps');
         klines = (raw as Record<string, unknown>[]).map((k) => ({
-          close: Number(k.close ?? k.c ?? 0),
+          close:  Number(k.close  ?? k.c ?? 0),
           volume: Number(k.volume ?? k.v ?? 0),
+          high:   k.high != null || k.h != null ? Number(k.high ?? k.h) : undefined,
+          low:    k.low  != null || k.l != null ? Number(k.low  ?? k.l) : undefined,
         }));
       } catch { /* proceed with empty */ }
       klinesRef.current = klines;   // share with fallback functions
       const tech = computeIndicators(klines);
+      // Feed ATR back into the adaptive threshold for the NEXT cycle.
+      if (Number.isFinite(tech.atrPct)) setLastAtrPct(tech.atrPct);
 
       // 2. Order book — REST fetch
       let imb = 0.5;
@@ -611,9 +750,23 @@ export const BtcPredictor: React.FC = () => {
         const tot = bidVol + askVol;
         if (tot > 0) imb = bidVol / tot;
       } catch { /* keep default 0.5 */ }
+      // Dynamic calibration: z-score imbalance against rolling history.
+      // Fall back to fixed 0.35 / 0.65 cuts until we have >= 5 samples.
+      const obHistory = obImbalanceHistoryRef.current;
+      obHistory.push(imb);
+      if (obHistory.length > ORDERBOOK_HISTORY) obHistory.shift();
       let obSignal = 0;
-      if (imb >= 0.65) obSignal = 1;
-      else if (imb <= 0.35) obSignal = -1;
+      let obZ = 0;
+      if (obHistory.length >= 5) {
+        const mean = obHistory.reduce((a, b) => a + b, 0) / obHistory.length;
+        const variance = obHistory.reduce((s, v) => s + (v - mean) ** 2, 0) / obHistory.length;
+        const std = Math.sqrt(variance);
+        obZ = std > 1e-6 ? (imb - mean) / std : 0;
+        obSignal = Math.max(-1, Math.min(1, obZ / 2));
+      } else {
+        if (imb >= 0.65) obSignal = 1;
+        else if (imb <= 0.35) obSignal = -1;
+      }
 
       // 3. Funding rate — REST fetch
       let frRate = 0;
@@ -638,11 +791,18 @@ export const BtcPredictor: React.FC = () => {
       } catch (err) {
         console.warn('[BtcPredictor] fetchFundingRates failed:', err);
       }
-      let frSignal = 0;
+      // Absolute-rate signal (contrarian: positive funding = longs paying,
+      // expect mean-reverting pullback). Scaled so ±0.01% → saturate ±1.
       const prevFr = prevFundingRef.current;
-      if (frRate > 0.0001) frSignal = -1;
-      else if (frRate < -0.0001) frSignal = 1;
-      else if (prevFr !== 0) frSignal = frRate > prevFr ? -0.5 : frRate < prevFr ? 0.5 : 0;
+      const frSignal = Math.max(-1, Math.min(1, -frRate / 0.0001));
+      // Momentum signal — change in funding between cycles. Rising funding
+      // often precedes a squeeze in the OPPOSITE direction to the crowd.
+      let fundingMomentum = 0;
+      let fundingMomentumSignal = 0;
+      if (prevFr !== 0 && frRate !== 0) {
+        fundingMomentum = frRate - prevFr;
+        fundingMomentumSignal = Math.max(-1, Math.min(1, -fundingMomentum / 0.00005));
+      }
       prevFundingRef.current = frRate !== 0 ? frRate : prevFr;
 
       // 4. News + ETF (cache-first, shared with other pages)
@@ -654,35 +814,52 @@ export const BtcPredictor: React.FC = () => {
       const news = newsResult.status === 'fulfilled' ? newsResult.value : { score: newsFallbackScore(), fromFallback: true, fetchedAt: Date.now() };
       const etf  = etfResult.status === 'fulfilled'  ? etfResult.value  : { score: etfFallbackScore(),  fromFallback: true, fetchedAt: Date.now() };
 
-      // 5. Weighted score
+      // 5. Weighted score — full 11-signal ensemble.
       const score =
-        obSignal                   * W.orderBook      +
-        frSignal                   * W.fundingRate    +
-        news.score                 * W.news           +
-        tech.microstructureSignal  * W.microstructure +
-        etf.score                  * W.etf            +
-        tech.emaSignal             * W.ema            +
-        tech.rsiSignal             * W.rsi            +
-        tech.macdSignal            * W.macd;
+        tech.microstructureSignal * W.microstructure +
+        tech.rocSignal            * W.roc            +
+        tech.emaSignal            * W.ema            +
+        tech.macdSignal           * W.macd           +
+        tech.rsiSignal            * W.rsi            +
+        obSignal                  * W.orderBook      +
+        news.score                * W.news           +
+        etf.score                 * W.etf            +
+        tech.vwapSignal           * W.vwap           +
+        frSignal                  * W.fundingRate    +
+        fundingMomentumSignal     * W.fundingMomentum;
 
       const threshold = neutralThresholdRef.current;
-      // Normalise against realistic max (weighted sum if all signals fire = 1.0,
-      // but in practice max reachable is ~0.55 when funding is N/A)
-      const realisticMax = 0.55;
+      // Realistic max — empirical ceiling for the score when signals are
+      // only partially aligned, even in a strong regime.
+      const realisticMax = 0.60;
       const confidence = Math.min(100, Math.round((Math.abs(score) / realisticMax) * 100));
 
-      const direction: PredictionDirection =
+      let direction: PredictionDirection =
         score >  threshold ? 'UP'  :
         score < -threshold ? 'DOWN' : 'NEUTRAL';
 
-      // Count how many signals agree with the direction
-      const signalValues = [obSignal, frSignal, news.score, tech.microstructureSignal,
-                            etf.score, tech.emaSignal, tech.rsiSignal, tech.macdSignal];
+      // Count how many signals agree with the proposed direction. Uses the
+      // full 11-signal vector so conviction reflects real consensus.
+      const signalValues = [
+        tech.microstructureSignal, tech.rocSignal, tech.emaSignal, tech.macdSignal, tech.rsiSignal,
+        obSignal, news.score, etf.score, tech.vwapSignal, frSignal, fundingMomentumSignal,
+      ];
       const dirSign = direction === 'UP' ? 1 : direction === 'DOWN' ? -1 : 0;
       const nonNeutral = signalValues.filter((v) => Math.abs(v) > 0.05);
       const agreeing   = nonNeutral.filter((v) => Math.sign(v) === dirSign);
-      const agreementCount = direction === 'NEUTRAL' ? 0 : agreeing.length;
-      const totalSignals   = nonNeutral.length;
+      let agreementCount = direction === 'NEUTRAL' ? 0 : agreeing.length;
+      const totalSignals = nonNeutral.length;
+
+      // Conviction filter — even if the weighted score clears the
+      // threshold, refuse to trade unless enough independent signals
+      // agree. Saves against one large-weight outlier overpowering the
+      // ensemble and opening a losing trade.
+      let convictionFailed = false;
+      if (direction !== 'NEUTRAL' && agreeing.length < MIN_CONVICTION_SIGNALS) {
+        direction = 'NEUTRAL';
+        agreementCount = 0;
+        convictionFailed = true;
+      }
 
       const signals: SignalSnapshot = {
         newsSentiment: news.score,
@@ -693,14 +870,21 @@ export const BtcPredictor: React.FC = () => {
         etfFallback:  !!(etf  as { fromFallback?: boolean }).fromFallback,
         orderBookImbalance: imb,
         orderBookSignal: obSignal,
+        orderBookZScore: obZ,
         fundingRate: frRate,
         fundingRateSignal: frSignal,
+        fundingMomentum,
+        fundingMomentumSignal,
         microstructureSignal: tech.microstructureSignal,
         volumeSpike: tech.volumeSpike,
         rsi: tech.rsi,
         rsiSignal: tech.rsiSignal,
         emaSignal: tech.emaSignal,
         macdSignal: tech.macdSignal,
+        vwapDeviation: tech.vwapDeviation,
+        vwapSignal: tech.vwapSignal,
+        rocSignal: tech.rocSignal,
+        atrPct: tech.atrPct,
         weightedScore: score,
         agreementCount,
         totalSignals,
@@ -726,7 +910,9 @@ export const BtcPredictor: React.FC = () => {
 
       setStatusMsg(
         direction === 'NEUTRAL'
-          ? `Score ${score.toFixed(3)} within ±${threshold} threshold — NEUTRAL, skipped`
+          ? (convictionFailed
+              ? `Score ${score.toFixed(3)} cleared ±${threshold.toFixed(2)} but only ${agreeing.length}/${MIN_CONVICTION_SIGNALS} signals agreed — NEUTRAL, skipped`
+              : `Score ${score.toFixed(3)} within ±${threshold.toFixed(2)} threshold — NEUTRAL, skipped`)
           : `↑ ${direction} predicted (score ${score.toFixed(3)}, ${agreementCount}/${totalSignals} signals agree) — resolving in 5 min…`,
       );
 
@@ -792,7 +978,7 @@ export const BtcPredictor: React.FC = () => {
       if (cycleTimerRef.current) clearTimeout(cycleTimerRef.current);
       cycleTimerRef.current = setTimeout(runPredictionCycle, CYCLE_MS);
     }
-  }, [fetchNewsSentiment, fetchEtfSignal, setCurrentPrediction, addHistoryEntry, resolvePrediction, placePredictorOrder, closePredictorPosition]);
+  }, [fetchNewsSentiment, fetchEtfSignal, newsFallbackScore, etfFallbackScore, setCurrentPrediction, addHistoryEntry, resolvePrediction, placePredictorOrder, closePredictorPosition]);
 
   const handleStart = useCallback(() => {
     if (!sosoApiKey) {
@@ -864,17 +1050,42 @@ export const BtcPredictor: React.FC = () => {
   };
 
   const signalRows: SignalDef[] = signals ? [
+    // Sorted by weight, descending — highest-impact signals on top.
+    {
+      label: 'Price Microstructure',
+      value: signals.microstructureSignal >= 0.5 ? 'HH/HL + Vol' : signals.microstructureSignal <= -0.5 ? 'LH/LL + Vol' : 'Mixed',
+      signal: signals.microstructureSignal,
+      weight: W.microstructure,
+    },
+    {
+      label: 'ROC 5/15m Momentum',
+      value: (signals.rocSignal ?? 0) >= 0.5 ? 'Strong up-drift'
+           : (signals.rocSignal ?? 0) <= -0.5 ? 'Strong down-drift'
+           : 'Drifting',
+      signal: signals.rocSignal ?? 0,
+      weight: W.roc,
+    },
+    {
+      label: 'EMA 9/21 Cross',
+      value: signals.emaSignal > 0 ? 'EMA9 > EMA21' : signals.emaSignal < 0 ? 'EMA9 < EMA21' : 'No cross',
+      signal: signals.emaSignal,
+      weight: W.ema,
+    },
     {
       label: 'Order Book Imbalance',
-      value: `${(signals.orderBookImbalance * 100).toFixed(1)}% bids`,
+      value: signals.orderBookZScore !== undefined
+        ? `${(signals.orderBookImbalance * 100).toFixed(1)}% bids (z=${signals.orderBookZScore.toFixed(2)})`
+        : `${(signals.orderBookImbalance * 100).toFixed(1)}% bids`,
       signal: signals.orderBookSignal,
       weight: W.orderBook,
     },
     {
-      label: 'Funding Rate Momentum',
-      value: signals.fundingRate !== 0 ? `${(signals.fundingRate * 100).toFixed(4)}%` : 'N/A',
-      signal: signals.fundingRateSignal,
-      weight: W.fundingRate,
+      label: 'VWAP Deviation',
+      value: (signals.vwapDeviation ?? 0) === 0
+        ? 'At VWAP'
+        : `${((signals.vwapDeviation ?? 0) * 100 >= 0 ? '+' : '')}${((signals.vwapDeviation ?? 0) * 100).toFixed(2)}%${Math.abs((signals.vwapDeviation ?? 0) * 100) > 0.15 ? ' — stretched' : ''}`,
+      signal: signals.vwapSignal ?? 0,
+      weight: W.vwap,
     },
     {
       label: 'News Sentiment',
@@ -886,12 +1097,6 @@ export const BtcPredictor: React.FC = () => {
       fetchedAt: signals.newsFallback ? null : signals.newsLastFetched,
     },
     {
-      label: 'Price Microstructure',
-      value: signals.microstructureSignal >= 0.5 ? 'HH/HL + Vol' : signals.microstructureSignal <= -0.5 ? 'LH/LL + Vol' : 'Mixed',
-      signal: signals.microstructureSignal,
-      weight: W.microstructure,
-    },
-    {
       label: 'BTC ETF Flow',
       value: signals.etfFlow >= 0 ? `+${(signals.etfFlow * 500).toFixed(0)}M` : `${(signals.etfFlow * 500).toFixed(0)}M`,
       signal: signals.etfFlow,
@@ -901,22 +1106,30 @@ export const BtcPredictor: React.FC = () => {
       fetchedAt: signals.etfFallback ? null : signals.etfLastFetched,
     },
     {
-      label: 'EMA 9/21 Cross',
-      value: signals.emaSignal > 0 ? 'EMA9 > EMA21' : signals.emaSignal < 0 ? 'EMA9 < EMA21' : 'No cross',
-      signal: signals.emaSignal,
-      weight: W.ema,
-    },
-    {
-      label: 'RSI (14) Extreme',
-      value: `${signals.rsi.toFixed(1)}${signals.rsi < 30 ? ' — Oversold' : signals.rsi > 70 ? ' — Overbought' : ' — Neutral zone'}`,
-      signal: signals.rsiSignal,
-      weight: W.rsi,
+      label: 'Funding Momentum',
+      value: (signals.fundingMomentum ?? 0) === 0
+        ? 'Flat'
+        : `${((signals.fundingMomentum ?? 0) * 100 >= 0 ? '+' : '')}${((signals.fundingMomentum ?? 0) * 100).toFixed(4)}% Δ`,
+      signal: signals.fundingMomentumSignal ?? 0,
+      weight: W.fundingMomentum,
     },
     {
       label: 'MACD Zero Cross',
       value: signals.macdSignal === 1 ? 'Crossed above 0' : signals.macdSignal === -1 ? 'Crossed below 0' : 'No cross',
       signal: signals.macdSignal,
       weight: W.macd,
+    },
+    {
+      label: 'Funding Rate (Contrarian)',
+      value: signals.fundingRate !== 0 ? `${(signals.fundingRate * 100).toFixed(4)}%` : 'N/A',
+      signal: signals.fundingRateSignal,
+      weight: W.fundingRate,
+    },
+    {
+      label: 'RSI (14) Extreme',
+      value: `${signals.rsi.toFixed(1)}${signals.rsi < 30 ? ' — Oversold' : signals.rsi > 70 ? ' — Overbought' : ' — Neutral zone'}`,
+      signal: signals.rsiSignal,
+      weight: W.rsi,
     },
   ] : [];
 
@@ -1363,7 +1576,7 @@ export const BtcPredictor: React.FC = () => {
               <span className="text-[10px] text-text-muted flex items-center gap-1">
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400" />
                 <span className="text-blue-400 font-semibold">SoDEX</span>
-                &nbsp;— Order Book, Funding Rate, Klines (EMA · RSI · MACD · Microstructure)
+                &nbsp;— Order Book (z-score), Funding (rate + momentum), Klines (EMA · RSI · MACD · Microstructure · ROC · VWAP · ATR)
               </span>
               <span className="text-[10px] text-text-muted flex items-center gap-1">
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400" />
@@ -1389,8 +1602,8 @@ export const BtcPredictor: React.FC = () => {
                 <Target size={16} className="text-primary" />
                 <h2 className="text-sm font-bold text-text-primary uppercase tracking-wide">Accuracy Tracker</h2>
               </div>
-              {neutralThreshold > NEUTRAL_BASE && (
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-400/15 text-amber-400 border border-amber-400/20 font-semibold">
+              {neutralThreshold >= 0.18 && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-400/15 text-amber-400 border border-amber-400/20 font-semibold" title={accuracyBelow45 ? 'Recent accuracy < 45% — demanding stronger consensus' : 'Low volatility — demanding stronger consensus to beat fees'}>
                   Auto-wide threshold
                 </span>
               )}
@@ -1465,6 +1678,67 @@ export const BtcPredictor: React.FC = () => {
                   </div>
                 ))}
               </div>
+
+              {/* Net PnL panel — fee-aware performance. Treats every non-
+                  NEUTRAL prediction as a hypothetical 1x-leverage round-trip
+                  and subtracts 2x taker fees so the number reflects what an
+                  always-on bot would have actually earned (or lost). */}
+              {(() => {
+                const netStats = computeNetPerformance(history);
+                if (netStats.tradesCount === 0) return null;
+                const totalClr = netStats.totalNetPct >= 0 ? 'text-emerald-400' : 'text-red-400';
+                const avgClr   = netStats.avgNetPct   >= 0 ? 'text-emerald-400' : 'text-red-400';
+                return (
+                  <div className="bg-white/[0.02] rounded-xl p-3 border border-white/5 flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase tracking-wider text-text-muted font-semibold">Net PnL (after fees, 1x lev.)</span>
+                      <span className="text-[10px] text-text-muted" title="Fee used: 0.04% taker × 2 (entry+exit)">{netStats.tradesCount} trades</span>
+                    </div>
+                    <div className="flex items-baseline justify-between">
+                      <span className={cn('text-2xl font-black font-mono', totalClr)}>
+                        {netStats.totalNetPct >= 0 ? '+' : ''}{netStats.totalNetPct.toFixed(2)}%
+                      </span>
+                      <span className="text-[11px] text-text-muted">cumulative</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-[10px]">
+                      <div className="flex flex-col">
+                        <span className="text-text-muted">Avg / trade</span>
+                        <span className={cn('font-mono font-bold', avgClr)}>
+                          {netStats.avgNetPct >= 0 ? '+' : ''}{netStats.avgNetPct.toFixed(3)}%
+                        </span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-text-muted">Best</span>
+                        <span className="font-mono font-bold text-emerald-400">+{netStats.bestNetPct.toFixed(2)}%</span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-text-muted">Worst</span>
+                        <span className="font-mono font-bold text-red-400">{netStats.worstNetPct.toFixed(2)}%</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 pt-1 border-t border-white/5 mt-1">
+                      <span className="text-[10px] text-text-muted">Net win rate</span>
+                      <div className="flex-1 h-1 rounded-full bg-white/5 overflow-hidden">
+                        <div
+                          className={cn(
+                            'h-full rounded-full transition-all duration-700',
+                            netStats.winRate >= 0.55 ? 'bg-emerald-400' :
+                            netStats.winRate >= 0.45 ? 'bg-amber-400' : 'bg-red-400/70',
+                          )}
+                          style={{ width: `${Math.round(netStats.winRate * 100)}%` }}
+                        />
+                      </div>
+                      <span className={cn(
+                        'text-[10px] font-mono font-bold',
+                        netStats.winRate >= 0.55 ? 'text-emerald-400' :
+                        netStats.winRate >= 0.45 ? 'text-amber-400' : 'text-red-400',
+                      )}>
+                        {Math.round(netStats.winRate * 100)}%
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Sparkline trend */}
               {sparkValues.length > 0 && (
