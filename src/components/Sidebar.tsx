@@ -2,13 +2,23 @@ import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { 
   LayoutDashboard, Grid2X2, Clock, Repeat, Users, LineChart, Coins, 
-  TimerOff, Bell, FlaskConical, Settings, Zap, BarChart2, Bot, Wrench, Brain
+  TimerOff, Bell, FlaskConical, Settings, Zap, BarChart2, Bot, Wrench, Brain,
+  Sparkles
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
-// We now group everything under 4 MAIN icons.
-// Hovering over a main icon reveals the group's sub-pages.
+// Five main nav groups. The 'ai' group is intentionally rendered first
+// and given a distinct gradient/glow treatment so the BtcPredictor (the
+// flagship feature) is the most visually prominent entry in the rail.
 const NAV_MENU = [
+  {
+    groupId: 'ai',
+    icon: Brain,
+    label: 'AI Tools',
+    items: [
+      { to: '/btc-predictor', icon: Brain, label: 'BTC Predictor' },
+    ]
+  },
   {
     groupId: 'overview',
     icon: LayoutDashboard,
@@ -49,14 +59,6 @@ const NAV_MENU = [
       { to: '/backtesting', icon: FlaskConical, label: 'Backtesting' },
     ]
   },
-  {
-    groupId: 'ai',
-    icon: Brain,
-    label: 'AI Tools',
-    items: [
-      { to: '/btc-predictor', icon: Brain, label: 'BTC Predictor' },
-    ]
-  }
 ];
 
 export const Sidebar: React.FC = () => {
@@ -94,22 +96,59 @@ export const Sidebar: React.FC = () => {
           </div>
         </div>
 
-        {/* Just 4 Main Category Buttons */}
+        {/* Main category buttons. The 'ai' group renders with a distinct
+            gradient/sparkle treatment so it reads as the headline tool. */}
         <div className="flex-1 flex flex-col gap-4 w-full">
-          {NAV_MENU.map((group) => (
-            <div 
-              key={group.groupId} 
-              className="relative w-full flex justify-center group/parent px-3"
-            >
-              {/* Main Category Icon */}
+          {NAV_MENU.map((group, idx) => (
+            <React.Fragment key={group.groupId}>
+              {/* Subtle separator between the AI hero entry and the rest of
+                  the menu so the eye groups them as 'flagship vs. utilities'. */}
+              {idx === 1 && (
+                <div className="mx-auto w-7 border-t border-white/10 my-1" aria-hidden />
+              )}
               <div 
-                className={cn(
-                  'flex items-center justify-center w-11 h-11 rounded-xl cursor-default transition-all duration-300',
-                  'text-text-secondary hover:text-primary hover:bg-primary/10 hover:shadow-[inset_0_0_12px_rgba(0,225,255,0.2)] hover:border hover:border-primary/20 group-hover/parent:text-primary group-hover/parent:bg-primary/10 group-hover/parent:shadow-[inset_0_0_12px_rgba(0,225,255,0.2)] group-hover/parent:border-primary/20'
-                )}
+                className="relative w-full flex justify-center group/parent px-3"
               >
-                <group.icon size={22} className="transition-transform duration-300 group-hover/parent:drop-shadow-[0_0_5px_rgba(0,225,255,0.8)] group-hover/parent:scale-110" />
-              </div>
+                {/* Main Category Icon */}
+                {group.groupId === 'ai' ? (
+                  <div
+                    className={cn(
+                      'relative flex items-center justify-center w-11 h-11 rounded-xl cursor-default transition-all duration-300 overflow-hidden',
+                      'bg-gradient-to-br from-violet-500/30 via-fuchsia-500/25 to-cyan-400/30',
+                      'border border-fuchsia-400/40',
+                      'shadow-[0_0_18px_rgba(217,70,239,0.45),inset_0_0_14px_rgba(168,85,247,0.30)]',
+                      'animate-pulse',
+                      'group-hover/parent:animate-none group-hover/parent:scale-[1.04]',
+                      'group-hover/parent:shadow-[0_0_28px_rgba(217,70,239,0.75),inset_0_0_22px_rgba(168,85,247,0.45)]',
+                      'group-hover/parent:border-fuchsia-300/70'
+                    )}
+                  >
+                    {/* Animated diagonal sheen reusing the global `shimmer` keyframe */}
+                    <span
+                      aria-hidden
+                      className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/15 to-transparent opacity-60 pointer-events-none"
+                      style={{ animation: 'shimmer 2.6s linear infinite', backgroundSize: '200% 100%' }}
+                    />
+                    <group.icon
+                      size={22}
+                      className="relative text-fuchsia-100 drop-shadow-[0_0_8px_rgba(217,70,239,0.9)] transition-transform duration-300 group-hover/parent:scale-110"
+                    />
+                    {/* Tiny sparkle in the corner to read as 'AI / new' */}
+                    <Sparkles
+                      size={10}
+                      className="absolute top-0.5 right-0.5 text-cyan-200 drop-shadow-[0_0_5px_rgba(0,225,255,0.9)] animate-pulse"
+                    />
+                  </div>
+                ) : (
+                  <div 
+                    className={cn(
+                      'flex items-center justify-center w-11 h-11 rounded-xl cursor-default transition-all duration-300',
+                      'text-text-secondary hover:text-primary hover:bg-primary/10 hover:shadow-[inset_0_0_12px_rgba(0,225,255,0.2)] hover:border hover:border-primary/20 group-hover/parent:text-primary group-hover/parent:bg-primary/10 group-hover/parent:shadow-[inset_0_0_12px_rgba(0,225,255,0.2)] group-hover/parent:border-primary/20'
+                    )}
+                  >
+                    <group.icon size={22} className="transition-transform duration-300 group-hover/parent:drop-shadow-[0_0_5px_rgba(0,225,255,0.8)] group-hover/parent:scale-110" />
+                  </div>
+                )}
 
               {/* Advanced Flyout Menu for Sub-items, overlapping slightly to prevent hover gaps */}
               <div 
@@ -124,9 +163,26 @@ export const Sidebar: React.FC = () => {
                   By using absolute left-full (which is 100% of the parent width),
                   the flyout starts exactly where the sidebar button area ends.
                 */}
-                <div className="glass-panel rounded-xl overflow-hidden shadow-[0_8px_40px_rgba(0,0,0,0.7)] border border-white/20">
-                  <div className="px-4 py-3 border-b border-white/10 bg-[#0A0D18]/90">
-                    <h3 className="text-xs font-bold uppercase tracking-widest text-[#00E1FF]">{group.label}</h3>
+                <div className={cn(
+                  'glass-panel rounded-xl overflow-hidden shadow-[0_8px_40px_rgba(0,0,0,0.7)] border',
+                  group.groupId === 'ai'
+                    ? 'border-fuchsia-400/30 shadow-[0_8px_40px_rgba(217,70,239,0.25)]'
+                    : 'border-white/20',
+                )}>
+                  <div className={cn(
+                    'px-4 py-3 border-b border-white/10',
+                    group.groupId === 'ai'
+                      ? 'bg-gradient-to-r from-violet-500/15 via-fuchsia-500/10 to-cyan-400/15'
+                      : 'bg-[#0A0D18]/90',
+                  )}>
+                    {group.groupId === 'ai' ? (
+                      <h3 className="text-xs font-bold uppercase tracking-widest flex items-center gap-1.5 bg-gradient-to-r from-fuchsia-300 via-violet-300 to-cyan-300 bg-clip-text text-transparent">
+                        <Sparkles size={10} className="text-fuchsia-300 shrink-0" />
+                        {group.label}
+                      </h3>
+                    ) : (
+                      <h3 className="text-xs font-bold uppercase tracking-widest text-[#00E1FF]">{group.label}</h3>
+                    )}
                   </div>
                   <div className="p-2 flex flex-col gap-1 bg-[#06090E]/95">
                     {group.items.map((item) => (
@@ -155,7 +211,8 @@ export const Sidebar: React.FC = () => {
                   </div>
                 </div>
               </div>
-            </div>
+              </div>
+            </React.Fragment>
           ))}
         </div>
 
