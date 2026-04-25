@@ -1534,6 +1534,7 @@ export const BtcPredictor: React.FC = () => {
                   </div>
                   <div className="text-[10px] text-text-muted" title="Volatility-adaptive. Widens when ATR is low or recent accuracy drops below 45%.">
                     threshold ±{neutralThreshold.toFixed(2)}
+                    {signals && ` · ATR ${signals.atrPct?.toFixed(2) ?? '?'}%`}
                     {signals && ` · ${signals.agreementCount}/${signals.totalSignals} agree (min ${MIN_CONVICTION_SIGNALS})`}
                   </div>
                 </div>
@@ -1661,11 +1662,43 @@ export const BtcPredictor: React.FC = () => {
                 <Target size={16} className="text-primary" />
                 <h2 className="text-sm font-bold text-text-primary uppercase tracking-wide">Accuracy Tracker</h2>
               </div>
-              {neutralThreshold >= 0.18 && (
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-400/15 text-amber-400 border border-amber-400/20 font-semibold" title={accuracyBelow45 ? 'Recent accuracy < 45% — demanding stronger consensus' : 'Low volatility — demanding stronger consensus to beat fees'}>
-                  Auto-wide threshold
-                </span>
-              )}
+              {(() => {
+                // Surface why the bot may be staying NEUTRAL: ATR-driven
+                // "market too quiet" wins over the generic wide-threshold
+                // badge because it's the more actionable explanation.
+                const atr = signals?.atrPct;
+                if (typeof atr === 'number' && atr < 0.10) {
+                  return (
+                    <span
+                      className="text-[10px] px-2 py-0.5 rounded-full bg-sky-400/15 text-sky-300 border border-sky-400/25 font-semibold"
+                      title={`Realized 5-min volatility (ATR) is only ${atr.toFixed(2)}%. Round-trip fee ≈ 0.08%, so the bot will skip most trades until volatility picks up.`}
+                    >
+                      Market too quiet
+                    </span>
+                  );
+                }
+                if (accuracyBelow45) {
+                  return (
+                    <span
+                      className="text-[10px] px-2 py-0.5 rounded-full bg-amber-400/15 text-amber-400 border border-amber-400/20 font-semibold"
+                      title="Recent accuracy < 45% — demanding stronger consensus before trading again"
+                    >
+                      Auto-wide threshold
+                    </span>
+                  );
+                }
+                if (neutralThreshold >= 0.14) {
+                  return (
+                    <span
+                      className="text-[10px] px-2 py-0.5 rounded-full bg-amber-400/10 text-amber-300 border border-amber-400/15 font-semibold"
+                      title="Low volatility — wider neutral threshold to keep fees from eating profits"
+                    >
+                      Low-vol guard
+                    </span>
+                  );
+                }
+                return null;
+              })()}
             </div>
             <div className="p-5 flex flex-col gap-4">
               {/* Big accuracy % */}

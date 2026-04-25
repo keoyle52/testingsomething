@@ -163,11 +163,16 @@ export async function fetchSosoNews(
   category?: number[],
   language = 'en',
 ): Promise<SosoNewsList> {
+  // SoSoValue API expects camelCase params (pageNum / pageSize / categoryList)
+  // and the documented endpoint is /api/v1/news/featured/currency for the
+  // currency-scoped feed. The plain /featured route also accepts the same
+  // camelCase parameter shape; using snake_case (page / page_size / category)
+  // returns 400 Bad Request.
   const query = buildQuery({
-    page,
-    page_size: pageSize,
+    pageNum: page,
+    pageSize,
     language,
-    category: category && category.length > 0 ? category.join(',') : undefined,
+    categoryList: category && category.length > 0 ? category.join(',') : undefined,
   });
   const res = await sosoValueClient.get(`/api/v1/news/featured?${query}`) as { data: unknown };
   return normalizeNewsList(res?.data, page, pageSize);
@@ -181,13 +186,15 @@ export async function fetchSosoNewsByCurrency(
   language = 'en',
 ): Promise<SosoNewsList> {
   const query = buildQuery({
-    page,
-    page_size: pageSize,
-    currency_id: currencyId,
+    pageNum: page,
+    pageSize,
+    currencyId,
     language,
-    category: category && category.length > 0 ? category.join(',') : undefined,
+    categoryList: category && category.length > 0 ? category.join(',') : undefined,
   });
-  const res = await sosoValueClient.get(`/api/v1/news?${query}`) as { data: unknown };
+  // Per SoSoValue API docs, the currency-scoped feed lives at
+  // /api/v1/news/featured/currency (not /api/v1/news).
+  const res = await sosoValueClient.get(`/api/v1/news/featured/currency?${query}`) as { data: unknown };
   return normalizeNewsList(res?.data, page, pageSize);
 }
 
