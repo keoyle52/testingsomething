@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import { 
   LayoutDashboard, Grid2X2, Clock, Repeat, Users, LineChart, Coins, 
   TimerOff, Bell, FlaskConical, Settings, Zap, BarChart2, Bot, Wrench, Brain,
-  Sparkles
+  Sparkles, Newspaper
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -16,7 +16,8 @@ const NAV_MENU = [
     icon: Brain,
     label: 'AI Tools',
     items: [
-      { to: '/btc-predictor', icon: Brain, label: 'BTC Predictor' },
+      { to: '/btc-predictor', icon: Brain,     label: 'BTC Predictor' },
+      { to: '/news-bot',      icon: Newspaper, label: 'News Bot'      },
     ]
   },
   {
@@ -36,7 +37,6 @@ const NAV_MENU = [
       { to: '/grid-bot', icon: Grid2X2, label: 'Grid Bot' },
       { to: '/twap-bot', icon: Clock, label: 'TWAP Bot' },
       { to: '/dca-bot', icon: Repeat, label: 'DCA Bot' },
-      { to: '/news-bot', icon: Zap, label: 'News Bot' },
       { to: '/schedule-cancel', icon: TimerOff, label: 'Scheduler' },
     ]
   },

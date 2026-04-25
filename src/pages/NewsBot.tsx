@@ -36,11 +36,21 @@ const DEFAULT_RULES: TriggerRule[] = [
   { keyword: 'hack', side: 'SELL', category: 0 },
 ];
 
-const POLL_MS = 180_000; // 3 minutes (reduced polling to save API limits)
+// 5-minute poll cadence — tight enough to react to breaking news within
+// the same news cycle, slack enough to stay well under SoSoValue's free
+// tier limits (worst case: 12 fetches/hour vs the 20+ we saw on 3-min).
+const POLL_MS = 5 * 60_000;
 const TRIGGER_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TRACKED_IDS = 2000;
 const AI_TIMEOUT_MS = 8000;
 const AI_RETRIES = 2;
+// Throttle for the manual "Poll" button so spamming it can't burn through
+// the SoSoValue / Gemini budget on a whim.
+const MANUAL_POLL_MIN_INTERVAL_MS = 30_000;
+// Hard cap on Gemini sentiment classifications per polling cycle. The
+// first poll after a fresh start often sees 5–10 brand-new headlines;
+// without this cap we'd burn 10 Gemini calls in one tick.
+const SENTIMENT_PER_POLL_LIMIT = 5;
 
 async function analyzeSentimentWithTimeout(title: string, timeoutMs = AI_TIMEOUT_MS): Promise<'BULLISH' | 'BEARISH' | 'NEUTRAL'> {
   return Promise.race([
@@ -85,6 +95,11 @@ export const NewsBot: React.FC = () => {
   const runningRef = useRef(false);
   const useAiRef = useRef(false); // needed for closure in interval
   const pollInFlightRef = useRef(false);
+  const lastManualPollRef = useRef(0);
+  // Track filterCoin in a ref so the bootstrap fetch (run inside `start`)
+  // and the interval-driven poll always see the latest selection without
+  // forcing `start` to recompute every time the user changes the filter.
+  const filterCoinRef = useRef('');
 
   const addLog = useCallback((type: LogEntry['type'], message: string) => {
     setLogs((prev) => [
@@ -152,12 +167,14 @@ export const NewsBot: React.FC = () => {
         }
       }
 
-      const result = filterCoin
-        ? await fetchSosoNewsByCurrency(filterCoin, 1, 10)
+      const activeFilter = filterCoinRef.current;
+      const result = activeFilter
+        ? await fetchSosoNewsByCurrency(activeFilter, 1, 10)
         : await fetchSosoNews(1, 10);
 
       const items = result.list || [];
       let processes = 0;
+      let sentimentCallsThisPoll = 0;
 
       for (const item of items) {
         if (triggeredIds.has(item.id)) continue;
@@ -165,6 +182,11 @@ export const NewsBot: React.FC = () => {
         const title = getNewsTitle(item);
 
         if (useAiRef.current) {
+          if (sentimentCallsThisPoll >= SENTIMENT_PER_POLL_LIMIT) {
+            addLog('info', `⚡ Sentiment quota reached (${SENTIMENT_PER_POLL_LIMIT}/poll) — skipping remaining headlines this cycle`);
+            break;
+          }
+          sentimentCallsThisPoll++;
           addLog('info', `🤖 Analyzing with AI: "${title.slice(0, 40)}..."`);
           try {
             const sentiment = await analyzeSentimentWithRetry(title);
@@ -193,7 +215,25 @@ export const NewsBot: React.FC = () => {
     } finally {
       pollInFlightRef.current = false;
     }
-  }, [filterCoin, matchesRules, executeTrade, addLog, triggeredIds]);
+  }, [matchesRules, executeTrade, addLog, triggeredIds]);
+
+  // Keep the filterCoin ref synced with state so `poll` always sees the
+  // current selection without the surrounding callback being recreated.
+  useEffect(() => { filterCoinRef.current = filterCoin; }, [filterCoin]);
+
+  // Manual "Poll" button — throttled to prevent spam from melting our
+  // SoSoValue / Gemini quotas. Uses the same poll() under the hood.
+  const manualPoll = useCallback(() => {
+    const now = Date.now();
+    const since = now - lastManualPollRef.current;
+    if (since < MANUAL_POLL_MIN_INTERVAL_MS) {
+      const wait = Math.ceil((MANUAL_POLL_MIN_INTERVAL_MS - since) / 1000);
+      addLog('info', `⏱ Manual poll throttled — wait ${wait}s before retrying`);
+      return;
+    }
+    lastManualPollRef.current = now;
+    void poll();
+  }, [poll, addLog]);
 
   const start = useCallback(() => {
     if (!sosoApiKey) { toast.error('Set SosoValue API key in Settings'); return; }
@@ -203,10 +243,32 @@ export const NewsBot: React.FC = () => {
     runningRef.current = true;
     useAiRef.current = useAi;
     setRunning(true);
-    addLog('info', `▶ Bot started (${useAi ? 'AI Sentiment' : 'Keyword'} mode) — polling ${Math.round(POLL_MS / 1000)}s`);
-    poll();
+    addLog('info', `▶ Bot started (${useAi ? 'AI Sentiment' : 'Keyword'} mode) — polling every ${Math.round(POLL_MS / 1000)}s`);
+
+    // Silent bootstrap: snapshot whatever headlines are CURRENTLY showing
+    // and stamp them as "already seen" so the bot only reacts to genuinely
+    // new news from this point onward. Without this, an AI-mode start
+    // could fire 5–10 Gemini classifications in a burst on the very first
+    // poll just because the trackedId set was empty.
+    void (async () => {
+      try {
+        const activeFilter = filterCoinRef.current;
+        const seed = activeFilter
+          ? await fetchSosoNewsByCurrency(activeFilter, 1, 10)
+          : await fetchSosoNews(1, 10);
+        const seedItems = seed.list ?? [];
+        const now = Date.now();
+        for (const it of seedItems) triggeredIds.set(it.id, now);
+        addLog('info', `Bootstrapped with ${seedItems.length} existing headlines — will only react to news posted from now on`);
+      } catch {
+        // Quiet fail: the next scheduled poll will surface any real error.
+      }
+    })();
+
+    // First real poll runs after POLL_MS — by then any new headline is
+    // genuinely new relative to the bootstrap snapshot.
     pollRef.current = setInterval(poll, POLL_MS);
-  }, [sosoApiKey, geminiApiKey, useAi, rules, poll, addLog]);
+  }, [sosoApiKey, geminiApiKey, useAi, rules, poll, addLog, triggeredIds]);
 
   const stop = useCallback(() => {
     runningRef.current = false;
@@ -285,7 +347,7 @@ export const NewsBot: React.FC = () => {
             >
               {running ? 'Stop' : 'Start'}
             </Button>
-            <Button variant="outline" icon={<RefreshCw size={13} />} onClick={poll} disabled={!running}>
+            <Button variant="outline" icon={<RefreshCw size={13} />} onClick={manualPoll} disabled={!running} title={`Manually poll headlines (throttled to once every ${MANUAL_POLL_MIN_INTERVAL_MS / 1000}s)`}>
               Poll
             </Button>
           </div>

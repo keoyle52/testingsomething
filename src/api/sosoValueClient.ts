@@ -30,13 +30,19 @@ const inflightRequests = new Map<string, Promise<unknown>>();
 
 const endpointRateLimitReset = new Map<string, number>();
 
+// Per-endpoint cache TTLs. Aligned with the consumers:
+//   • coin list: rarely changes, can sit for 10 min.
+//   • ETF dashboards: 5–10 min is plenty (data updates daily).
+//   • News feeds: NewsBot polls every 5 min, BtcPredictor every 5 min,
+//     so 4 min on the client cache means each scheduled poll always
+//     gets fresh data while ad-hoc / manual / parallel-page reads dedupe.
 const TTL: Record<string, number> = {
-  '/openapi/v1/data/default/coin/list':      5 * 60_000, 
-  '/openapi/v2/etf/historicalInflowChart':   5 * 60_000, 
-  '/openapi/v2/etf/currentEtfDataMetrics':   3 * 60_000, 
-  '/api/v1/news/featured':                   2 * 60_000, 
-  '/api/v1/news/featured/currency':          2 * 60_000,
-  '/api/v1/news':                            3 * 60_000, 
+  '/openapi/v1/data/default/coin/list':      10 * 60_000,
+  '/openapi/v2/etf/historicalInflowChart':   10 * 60_000,
+  '/openapi/v2/etf/currentEtfDataMetrics':    5 * 60_000,
+  '/api/v1/news/featured':                    4 * 60_000,
+  '/api/v1/news/featured/currency':           4 * 60_000,
+  '/api/v1/news':                             4 * 60_000,
 };
 
 function getCacheTtl(url: string): number {
