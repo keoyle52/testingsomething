@@ -42,7 +42,16 @@ const KLINES_LIMIT  = 40;               // enough for EMA-21 + microstructure
 const BTC_SYMBOL_HINT = 'BTC';        // substring match against fetchTickers result
 const NEUTRAL_WIDE  = 0.18;             // self-correcting threshold when accuracy drops
 const ORDERBOOK_HISTORY = 30;           // rolling window for dynamic imbalance z-score
-const MIN_CONVICTION_SIGNALS = 2;       // min non-neutral signals agreeing before a trade fires
+// 12 signals total → require 3 agreeing (was 2). At weights summing to 1.0,
+// any single >0.15 signal could previously drag two tiny aligned signals over
+// the line. Three independent agreements is a more honest consensus.
+const MIN_CONVICTION_SIGNALS = 3;
+// Warmup gate — first N cycles after Start are observed but not traded so the
+// adaptive components (ATR baseline, orderbook z-score history) have data to
+// calibrate against. Without this, the first 5 trades fire with a default
+// threshold and feed the accuracy circuit-breaker garbage that takes another
+// 5+ trades to undo.
+const WARMUP_CYCLES = 10;
 
 // ─── Weights ──────────────────────────────────────────────────────────────────
 // Designed for the 5-minute horizon, where technical momentum
@@ -77,13 +86,15 @@ const W = {
  * volume" goal: produce as many trades as possible while keeping
  * expected value positive after the round-trip taker fee (~0.08%).
  *
- *   ATR < 0.05%  → 0.30  refuse outright — 5-min move ≪ fee, EV is
+ *   ATR < 0.10%  → 0.30  refuse outright — 5-min move ≲ fee, EV is
  *                       structurally negative no matter how strong
- *                       the composite score looks.
- *   ATR < 0.10%  → 0.14  near-dead market, demand strong consensus.
- *   ATR < 0.20%  → 0.08  normal regime, fire frequently.
- *   ATR < 0.30%  → 0.06  active, fire on most decent scores.
- *   ATR ≥ 0.30%  → 0.05  volatile, almost any directional bias is tradable.
+ *                       the composite score looks. (Tightened from
+ *                       0.05% after observing first-trade losses where
+ *                       the best winning move was only +0.04% net.)
+ *   ATR < 0.15%  → 0.16  near-dead market, demand strong consensus.
+ *   ATR < 0.25%  → 0.10  normal regime, fire selectively.
+ *   ATR < 0.35%  → 0.07  active, fire on most decent scores.
+ *   ATR ≥ 0.35%  → 0.05  volatile, almost any directional bias is tradable.
  *
  * If recent accuracy collapses (<45% over the last 20 decided trades)
  * the threshold widens to NEUTRAL_WIDE regardless of ATR — a circuit
@@ -91,11 +102,11 @@ const W = {
  */
 function computeNeutralThreshold(atrPct: number, accuracyBelow45: boolean): number {
   if (accuracyBelow45) return NEUTRAL_WIDE;
-  if (!Number.isFinite(atrPct) || atrPct <= 0) return 0.10;
-  if (atrPct < 0.05) return 0.30;   // dead market — fee guard
-  if (atrPct < 0.10) return 0.14;
-  if (atrPct < 0.20) return 0.08;
-  if (atrPct < 0.30) return 0.06;
+  if (!Number.isFinite(atrPct) || atrPct <= 0) return 0.16;
+  if (atrPct < 0.10) return 0.30;   // dead market — fee guard
+  if (atrPct < 0.15) return 0.16;
+  if (atrPct < 0.25) return 0.10;
+  if (atrPct < 0.35) return 0.07;
   return 0.05;                       // volatile → fire often
 }
 
@@ -630,6 +641,14 @@ export const BtcPredictor: React.FC = () => {
   // typical state (BTC often sits slightly bid-heavy) rather than fixed
   // 0.35 / 0.65 cut-offs.
   const obImbalanceHistoryRef = useRef<number[]>([]);
+  // Warmup counter — increments every cycle; while < WARMUP_CYCLES the
+  // engine still computes signals but forces NEUTRAL so ATR/orderbook/
+  // funding history can calibrate before any real money moves. Reset
+  // back to 0 on Stop so each fresh session re-warms.
+  const cycleCountRef = useRef(0);
+  // Mirrored into state so the UI can show a "warming up X/10" banner
+  // without subscribing to a ref directly.
+  const [cycleCount, setCycleCount] = useState(0);
 
   // ── Volatility-adaptive neutral threshold ────────────────────
   // ATR is measured each cycle; the threshold widens when volatility
@@ -781,6 +800,10 @@ export const BtcPredictor: React.FC = () => {
   const runPredictionCycle = useCallback(async () => {
     if (!isRunningRef.current) return;
     setIsAnalyzing(true);
+    // Bump the cycle counter at the top of every run so the warmup gate
+    // and the UI banner share a single source of truth.
+    cycleCountRef.current += 1;
+    setCycleCount(cycleCountRef.current);
     setStatusMsg('Collecting signals…');
 
     try {
@@ -932,9 +955,20 @@ export const BtcPredictor: React.FC = () => {
         direction = 'NEUTRAL';
         convictionFailed = true;
       }
-      const neutralReason: 'weak_score' | 'low_conviction' | null =
+
+      // Warmup gate — first WARMUP_CYCLES cycles are observation-only so
+      // the orderbook z-score, ATR baseline, and funding-momentum
+      // history have actual data to compare against. Without this, the
+      // first several trades fire blind and feed the accuracy circuit
+      // breaker garbage that takes another 5+ trades to undo.
+      const inWarmup = cycleCountRef.current <= WARMUP_CYCLES;
+      if (inWarmup) {
+        direction = 'NEUTRAL';
+      }
+
+      const neutralReason: 'weak_score' | 'low_conviction' | 'warmup' | null =
         direction === 'NEUTRAL'
-          ? (convictionFailed ? 'low_conviction' : 'weak_score')
+          ? (inWarmup ? 'warmup' : (convictionFailed ? 'low_conviction' : 'weak_score'))
           : null;
 
       // Debug log — always on so the user can open devtools (F12 →
@@ -1018,9 +1052,11 @@ export const BtcPredictor: React.FC = () => {
 
       setStatusMsg(
         direction === 'NEUTRAL'
-          ? (convictionFailed
-              ? `Score ${score.toFixed(3)} cleared ±${threshold.toFixed(2)} but only ${agreeing.length}/${MIN_CONVICTION_SIGNALS} signals agreed — NEUTRAL, skipped`
-              : `Score ${score.toFixed(3)} within ±${threshold.toFixed(2)} threshold — NEUTRAL, skipped`)
+          ? (inWarmup
+              ? `Warming up (${cycleCountRef.current}/${WARMUP_CYCLES}) — observing markets while indicators calibrate`
+              : convictionFailed
+                ? `Score ${score.toFixed(3)} cleared ±${threshold.toFixed(2)} but only ${agreeing.length}/${MIN_CONVICTION_SIGNALS} signals agreed — NEUTRAL, skipped`
+                : `Score ${score.toFixed(3)} within ±${threshold.toFixed(2)} threshold — NEUTRAL, skipped`)
           : `↑ ${direction} predicted (score ${score.toFixed(3)}, ${agreementCount}/${totalSignals} signals agree) — resolving in 5 min…`,
       );
 
@@ -1128,6 +1164,10 @@ export const BtcPredictor: React.FC = () => {
     setIsRunning(false);
     if (cycleTimerRef.current)   clearTimeout(cycleTimerRef.current);
     if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current);
+    // Reset warmup counter so the next Start re-warms instead of trading
+    // immediately on stale calibration data.
+    cycleCountRef.current = 0;
+    setCycleCount(0);
     setStatusMsg('Stopped. Press Start to resume.');
   }, []);
 
@@ -1887,6 +1927,29 @@ export const BtcPredictor: React.FC = () => {
               })()}
             </div>
             <div className="p-5 flex flex-col gap-4">
+              {/* Warmup banner — visible while the engine is observation-only.
+                  Hidden once the warmup gate releases (cycleCount > WARMUP_CYCLES). */}
+              {isRunning && cycleCount > 0 && cycleCount <= WARMUP_CYCLES && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-violet-500/10 border border-violet-500/30 text-violet-200 text-[11px]">
+                  <RefreshCw size={12} className="animate-spin shrink-0" />
+                  <span>
+                    <strong>Warming up — cycle {cycleCount}/{WARMUP_CYCLES}.</strong>
+                    {' '}Indicators are being calibrated; predictions stay NEUTRAL until the engine has enough data to be confident.
+                  </span>
+                </div>
+              )}
+              {/* Small-sample-size advisory — accuracy below ~20 trades is
+                  statistical noise. Displayed until enough decided trades
+                  exist to draw a real conclusion. */}
+              {total > 0 && total < 20 && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-[11px]">
+                  <AlertTriangle size={12} className="shrink-0" />
+                  <span>
+                    <strong>Small sample.</strong>
+                    {' '}{total} decided trade{total === 1 ? '' : 's'} — at least <span className="font-mono">20</span> are needed before the win-rate is statistically meaningful. Treat the headline number as directional, not a verdict.
+                  </span>
+                </div>
+              )}
               {/* Big accuracy % */}
               <div className="text-center py-2">
                 <div className={cn(
