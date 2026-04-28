@@ -13,6 +13,8 @@ import {
   fetchOpenOrders,
   normalizeSymbol,
   updatePerpsLeverage,
+  getPerpsSymbolMeta,
+  type PerpsSymbolMeta,
 } from '../api/services';
 import { cn, getErrorMessage } from '../lib/utils';
 import { NumberDisplay } from '../components/common/NumberDisplay';
@@ -104,6 +106,36 @@ export const GridBot: React.FC = () => {
   const [lastPrice, setLastPrice] = useState<number | null>(null);
   const lastPriceRef = useRef<number | null>(null);
   const prevPriceForCrossRef = useRef<number | null>(null);
+
+  // Dynamically resolved leverage cap for the current perps symbol so the
+  // input can never exceed the value SoDEX would reject. BTC sits at 25×
+  // for example, alts often top out at 10× or 20× — relying on the live
+  // metadata avoids any hard-coded assumption.
+  const [perpsMeta, setPerpsMeta] = useState<PerpsSymbolMeta | null>(null);
+  const [perpsMetaErr, setPerpsMetaErr] = useState<string | null>(null);
+  const leverageCap = perpsMeta?.maxLeverage ?? 25;
+  useEffect(() => {
+    if (state.isSpot) { setPerpsMeta(null); setPerpsMetaErr(null); return; }
+    let cancelled = false;
+    setPerpsMetaErr(null);
+    // Take only the base ticker (e.g. "BTC" from "BTC-USD") so the helper
+    // can scan all USD/USDC/USDT-quoted candidates.
+    const ticker = state.symbol.split(/[-_/]/)[0];
+    void (async () => {
+      const meta = await getPerpsSymbolMeta(ticker).catch(() => null);
+      if (cancelled) return;
+      setPerpsMeta(meta);
+      if (!meta) {
+        setPerpsMetaErr(`No live cap for ${ticker} — using 25× default`);
+        return;
+      }
+      // Pull the user-set leverage down if it now exceeds the resolved cap.
+      const userLev = parseInt(state.leverage) || 1;
+      if (userLev > meta.maxLeverage) state.setField('leverage', String(meta.maxLeverage));
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.symbol, state.isSpot]);
 
   const addLog = useCallback((entry: Omit<LogEntry, 'time'>) => {
     setLogs((prev) =>
@@ -303,9 +335,20 @@ export const GridBot: React.FC = () => {
 
     // For perps, push the chosen leverage to the exchange before placing
     // the ladder. Mirrors what the user would do manually in the SoDEX UI.
+    // Resolve the live cap one last time and clamp against it — defends
+    // against the user editing the box and pressing Start before the meta
+    // useEffect has had a chance to clamp.
     if (!s.isSpot) {
-      const lev = parseInt(s.leverage);
-      if (Number.isFinite(lev) && lev > 0) {
+      let lev = parseInt(s.leverage);
+      if (!Number.isFinite(lev) || lev < 1) lev = 1;
+      const liveMeta = perpsMeta ?? await getPerpsSymbolMeta(s.symbol.split(/[-_/]/)[0]).catch(() => null);
+      const cap = liveMeta?.maxLeverage ?? 25;
+      if (lev > cap) {
+        addLog({ message: `Requested ${lev}× exceeds ${s.symbol} cap ${cap}× — clamping.` });
+        lev = cap;
+        s.setField('leverage', String(cap));
+      }
+      if (lev > 0) {
         try { await updatePerpsLeverage(s.symbol, lev, 2); }
         catch (err: unknown) { addLog({ message: `Leverage update skipped: ${getErrorMessage(err)}` }); }
       }
@@ -348,7 +391,7 @@ export const GridBot: React.FC = () => {
     addLog({ message: `Placed ${activeCount} initial orders across ${count} grid levels` });
 
     pollRef.current = setInterval(pollOrders, POLL_INTERVAL);
-  }, [addLog, fetchLastPrice, placeGridOrder, pollOrders]);
+  }, [addLog, fetchLastPrice, placeGridOrder, pollOrders, perpsMeta]);
 
   /**
    * Watch for the trigger price to be crossed in the configured direction.
@@ -542,8 +585,11 @@ export const GridBot: React.FC = () => {
     if (tooNarrow) rows.push({ label: 'Heads-up', value: 'Range < 4%', tone: 'warning', hint: 'Narrow ranges break out frequently.' });
 
     const lev = parseInt(state.leverage) || 1;
+    // High when leverage exceeds half the live cap (e.g. > 12× when BTC's
+    // cap is 25). Falls back to "> 5×" when the cap hasn't loaded yet.
+    const highLevThreshold = perpsMeta ? Math.max(2, Math.floor(perpsMeta.maxLeverage / 2)) : 5;
     const risk: 'Low' | 'Medium' | 'High' =
-      (!state.isSpot && lev > 5) || (state.mode !== 'NEUTRAL' && (tooWide || tooNarrow)) ? 'High'
+      (!state.isSpot && lev > highLevThreshold) || (state.mode !== 'NEUTRAL' && (tooWide || tooNarrow)) ? 'High'
       : (state.mode !== 'NEUTRAL' || tooWide || tooNarrow || lev > 1) ? 'Medium'
       : 'Low';
     const totalRisk = investmentEstimate > 0
@@ -693,8 +739,19 @@ export const GridBot: React.FC = () => {
                 type="number"
                 value={state.leverage}
                 onChange={(e) => state.setField('leverage', e.target.value)}
+                onBlur={(e) => {
+                  // Hard-clamp on blur so we never push a leverage SoDEX
+                  // would reject, even if the user typed past the cap.
+                  const v = parseInt(e.target.value);
+                  if (!Number.isFinite(v) || v < 1) state.setField('leverage', '1');
+                  else if (v > leverageCap) state.setField('leverage', String(leverageCap));
+                }}
                 disabled={isLocked}
-                hint="1 – 50× (perps only)"
+                hint={
+                  perpsMeta
+                    ? `1 – ${leverageCap}× (live cap from SoDEX)`
+                    : perpsMetaErr ?? `1 – ${leverageCap}× (resolving cap…)`
+                }
               />
             )}
             <Input

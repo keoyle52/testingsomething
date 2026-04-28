@@ -53,11 +53,13 @@ function dynamicConvictionFloor(consecutiveLosses: number): number {
   return consecutiveLosses >= 2 ? MIN_CONVICTION_AFTER_LOSSES : MIN_CONVICTION_BASE;
 }
 // Warmup gate — first N cycles after Start are observed but not traded so the
-// adaptive components (ATR baseline, orderbook z-score history) have data to
-// calibrate against. Without this, the first 5 trades fire with a default
-// threshold and feed the accuracy circuit-breaker garbage that takes another
-// 5+ trades to undo.
-const WARMUP_CYCLES = 10;
+// adaptive components (orderbook z-score history, funding-momentum baseline)
+// have *some* data to calibrate against before risking capital. The orderbook
+// signal already gracefully falls back to fixed cuts while history < 5
+// samples, so we don't need a long warmup; 3 cycles (~15 min) is enough
+// for the funding-momentum prevRef to populate while keeping the user's
+// total wait time short.
+const WARMUP_CYCLES = 3;
 
 // ─── Weights ──────────────────────────────────────────────────────────────────
 // Designed for the 5-minute horizon, where technical momentum

@@ -263,7 +263,7 @@ export async function fetchSymbols(market: 'spot' | 'perps' = 'perps') {
       marketMaxQuantity: '1000000',
       minNotional: '1',
       maxNotional: '10000000',
-      maxLeverage: 50,
+      maxLeverage: 25,
       initLeverage: 5,
       lastTradePrice: String(t.lastPrice),
       status: 'TRADING',
@@ -527,7 +527,7 @@ export async function getPerpsSymbolMeta(ticker: string): Promise<PerpsSymbolMet
     const init = Number(entry.initLeverage ?? entry.defaultLeverage ?? 0);
     return {
       symbol:       String(entry.symbol ?? cand),
-      maxLeverage:  Number.isFinite(max)  && max  > 0 ? max  : 50,
+      maxLeverage:  Number.isFinite(max)  && max  > 0 ? max  : 25,
       initLeverage: Number.isFinite(init) && init > 0 ? init : 5,
     };
   }
