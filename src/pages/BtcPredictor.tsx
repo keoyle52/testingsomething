@@ -505,7 +505,9 @@ export const BtcPredictor: React.FC = () => {
     history, correct, wrong, skipped,
     setCurrentPrediction, resolvePrediction, addHistoryEntry, resetStats,
     autoTradeEnabled, tradeAmountUsdt, tradeLeverage, closeOnNeutral, renewEveryCycle,
+    stopLossEnabled, slAtrMult,
     setAutoTradeEnabled, setTradeAmountUsdt, setTradeLeverage, setCloseOnNeutral, setRenewEveryCycle,
+    setStopLossEnabled, setSlAtrMult,
     openPosition, setOpenPosition,
   } = usePredictorStore();
 
@@ -711,11 +713,18 @@ export const BtcPredictor: React.FC = () => {
   const closeOnNeutralRef   = useRef(closeOnNeutral);
   const renewEveryCycleRef  = useRef(renewEveryCycle);
   const openPositionRef     = useRef(openPosition);
+  // Refs for the SL watcher so the effect deps stay minimal (only btcPrice).
+  const stopLossEnabledRef  = useRef(stopLossEnabled);
+  const slAtrMultRef        = useRef(slAtrMult);
+  const lastAtrPctRef       = useRef(0);
   useEffect(() => { autoTradeEnabledRef.current = autoTradeEnabled; }, [autoTradeEnabled]);
   useEffect(() => { tradeAmountUsdtRef.current  = tradeAmountUsdt;  }, [tradeAmountUsdt]);
   useEffect(() => { tradeLeverageRef.current    = tradeLeverage;    }, [tradeLeverage]);
   useEffect(() => { closeOnNeutralRef.current   = closeOnNeutral;   }, [closeOnNeutral]);
   useEffect(() => { renewEveryCycleRef.current  = renewEveryCycle;  }, [renewEveryCycle]);
+  useEffect(() => { stopLossEnabledRef.current  = stopLossEnabled;  }, [stopLossEnabled]);
+  useEffect(() => { slAtrMultRef.current        = slAtrMult;        }, [slAtrMult]);
+  useEffect(() => { lastAtrPctRef.current       = lastAtrPct;       }, [lastAtrPct]);
   useEffect(() => { openPositionRef.current     = openPosition;     }, [openPosition]);
 
   /**
@@ -763,6 +772,51 @@ export const BtcPredictor: React.FC = () => {
       return false;
     }
   }, [setOpenPosition]);
+
+  /**
+   * Intracycle stop-loss watcher.
+   *
+   * The predictor's standard exit is the 5-minute cycle resolution timer.
+   * That fixed window lets a position run the full distance against the
+   * trade in the worst case — empirically a single −0.19% loss erased
+   * four near-break-even wins on a small live sample.
+   *
+   * This effect closes the position the moment the live BTC tick puts
+   * unrealised PnL below `−slAtrMult × ATR%`. ATR is the latest 1-min
+   * ATR(14)% computed by the cycle, so the stop adapts to volatility:
+   *   ATR 0.10% × 1.5 → SL at −0.15% (calm regime, tight stop)
+   *   ATR 0.20% × 1.5 → SL at −0.30% (active regime, wider stop)
+   *
+   * Skip conditions, in order:
+   *   - SL toggle off
+   *   - No open position
+   *   - ATR not yet computed (first cycle of the run)
+   *   - Live price unavailable
+   *
+   * Only `btcPrice` is in the deps; everything else is read through refs
+   * so the effect runs on every tick without re-creating itself.
+   */
+  const slClosingRef = useRef(false);
+  useEffect(() => {
+    if (!stopLossEnabledRef.current) return;
+    const pos = openPositionRef.current;
+    if (!pos) return;
+    if (slClosingRef.current) return;        // already firing, don't double-send
+    const atrPct = lastAtrPctRef.current;
+    if (!atrPct || atrPct <= 0) return;
+    if (btcPrice <= 0) return;
+
+    const dir   = pos.side === 'LONG' ? 1 : -1;
+    const pnlPct = ((btcPrice - pos.entryPrice) / pos.entryPrice) * 100 * dir;
+    const slPct  = -(atrPct * slAtrMultRef.current);
+
+    if (pnlPct <= slPct) {
+      slClosingRef.current = true;
+      void closePredictorPosition(
+        `stop-loss ${pnlPct.toFixed(2)}% ≤ ${slPct.toFixed(2)}% (${slAtrMultRef.current}× ATR ${atrPct.toFixed(2)}%)`,
+      ).finally(() => { slClosingRef.current = false; });
+    }
+  }, [btcPrice, closePredictorPosition]);
 
   /**
    * Place a market order matching the predicted direction.
@@ -1539,6 +1593,52 @@ export const BtcPredictor: React.FC = () => {
                 />
                 <span>Renew position every cycle <span className="text-text-muted">(volume farming)</span></span>
               </label>
+
+              {/* ── ATR-scaled intracycle stop-loss ──
+                  Closes the open position the moment unrealised PnL drops
+                  below `−slAtrMult × ATR%`. Adapts to volatility regime
+                  automatically: tighter in calm markets, wider in active
+                  ones. Defends against the failure mode where a single
+                  full-cycle adverse move erases multiple winning trades. */}
+              <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer" title="When unrealised PnL drops below −(multiplier × ATR%), the bot force-closes the position before the 5-min cycle ends. Caps tail-risk losses without affecting normal exits.">
+                <input
+                  type="checkbox"
+                  checked={stopLossEnabled}
+                  onChange={(e) => setStopLossEnabled(e.target.checked)}
+                  disabled={isRunning}
+                  className="accent-amber-500"
+                />
+                <span>
+                  ATR stop-loss
+                  {stopLossEnabled && lastAtrPct > 0 && (
+                    <span className="text-text-muted ml-1 font-mono">
+                      ≈ −{(lastAtrPct * slAtrMult).toFixed(2)}%
+                    </span>
+                  )}
+                </span>
+              </label>
+
+              {stopLossEnabled && (
+                <div className="flex flex-col gap-1 pl-6">
+                  <label className="text-[10px] text-text-muted uppercase tracking-wider flex items-center justify-between">
+                    <span>Stop multiplier</span>
+                    <span className="font-mono text-amber-400">{slAtrMult.toFixed(1)}× ATR</span>
+                  </label>
+                  <input
+                    type="range"
+                    min={0.5}
+                    max={3}
+                    step={0.1}
+                    value={slAtrMult}
+                    onChange={(e) => setSlAtrMult(parseFloat(e.target.value))}
+                    className="accent-amber-500"
+                  />
+                  <div className="flex justify-between text-[9px] text-text-muted font-mono">
+                    <span>0.5× (tight)</span>
+                    <span>3× (wide)</span>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -1589,6 +1689,20 @@ export const BtcPredictor: React.FC = () => {
                 </div>
                 <div className="text-[10px] text-text-muted mt-0.5">
                   Opened {new Date(openPosition.openedAt).toLocaleTimeString()} • entry ${openPosition.entryPrice.toFixed(2)} • notional {openPosition.notionalUsdt} USDT
+                  {stopLossEnabled && lastAtrPct > 0 && (() => {
+                    // Surface the absolute SL price + how far the live mid
+                    // is from it, so the user can read tail-risk at a glance
+                    // instead of having to compute ATR × multiplier in their
+                    // head every tick.
+                    const slPctDist = lastAtrPct * slAtrMult;
+                    const dir = openPosition.side === 'LONG' ? 1 : -1;
+                    const slPrice = openPosition.entryPrice * (1 - (slPctDist / 100) * dir);
+                    return (
+                      <span className="text-amber-400/80">
+                        {' '}• SL ${slPrice.toFixed(2)} (−{slPctDist.toFixed(2)}%)
+                      </span>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -1599,6 +1713,12 @@ export const BtcPredictor: React.FC = () => {
                 const pnlUsdt = (btcPrice - openPosition.entryPrice) * openPosition.quantity * dir;
                 const pnlPct  = ((btcPrice - openPosition.entryPrice) / openPosition.entryPrice) * 100 * dir;
                 const positive = pnlUsdt >= 0;
+                // Distance to SL as a fraction of total SL distance — used
+                // to colour the badge red as the position approaches stop.
+                const slPctDist = stopLossEnabled && lastAtrPct > 0 ? lastAtrPct * slAtrMult : 0;
+                const slProximity = slPctDist > 0 && pnlPct < 0
+                  ? Math.min(1, Math.abs(pnlPct) / slPctDist)
+                  : 0;
                 return (
                   <div className="flex flex-col items-end">
                     <span className={cn(
@@ -1612,6 +1732,11 @@ export const BtcPredictor: React.FC = () => {
                       positive ? 'text-emerald-400/70' : 'text-red-400/70',
                     )}>
                       {positive ? '+' : ''}{pnlPct.toFixed(3)}%
+                      {slProximity > 0.5 && (
+                        <span className="ml-1.5 text-amber-400">
+                          • {(slProximity * 100).toFixed(0)}% to SL
+                        </span>
+                      )}
                     </span>
                   </div>
                 );

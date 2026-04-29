@@ -100,6 +100,17 @@ interface PredictorState {
    *  even if the direction is unchanged. Primary use-case: volume farming
    *  for airdrop eligibility. Costs 2x taker fees per cycle. */
   renewEveryCycle: boolean;
+  /** When true, the predictor evaluates an ATR-scaled stop-loss on every
+   *  live BTC tick and force-closes the position when the unrealised loss
+   *  exceeds `slAtrMult × ATR%`. Defends against the tail-risk pattern
+   *  where a single 5-minute cycle gives the position room to take a
+   *  full-distance adverse move that erases multiple winning trades. */
+  stopLossEnabled: boolean;
+  /** Multiplier applied to the latest 1-min ATR(14)% to compute the
+   *  intracycle stop-loss distance. 1.5 means "stop out at 1.5x normal
+   *  volatility against me" — tight enough to cap tail risk, wide
+   *  enough to avoid noise stop-outs in calm regimes. */
+  slAtrMult: number;
 
   // ── Currently open bot-managed position ──
   openPosition: OpenPosition | null;
@@ -114,6 +125,8 @@ interface PredictorState {
   setTradeLeverage: (v: number) => void;
   setCloseOnNeutral: (v: boolean) => void;
   setRenewEveryCycle: (v: boolean) => void;
+  setStopLossEnabled: (v: boolean) => void;
+  setSlAtrMult: (v: number) => void;
   setOpenPosition: (p: OpenPosition | null) => void;
 }
 
@@ -160,6 +173,13 @@ export const usePredictorStore = create<PredictorState>()(
       tradeLeverage: 5,
       closeOnNeutral: false,
       renewEveryCycle: false,
+      // Stop-loss defaults: ON at 1.5x ATR. Empirically calibrated against
+      // a 5-trade live sample where a single −0.19% loss erased four
+      // ~+0% wins; with ATR ~0.10–0.15% that translates to a stop
+      // distance of ~0.15–0.22% which would have capped the worst trade
+      // before it ran the full cycle.
+      stopLossEnabled: true,
+      slAtrMult: 1.5,
       openPosition: null,
 
       setAutoTradeEnabled: (v) => set({ autoTradeEnabled: v }),
@@ -168,6 +188,10 @@ export const usePredictorStore = create<PredictorState>()(
       setTradeLeverage: (v) => set({ tradeLeverage: Math.max(1, Math.min(25, v)) }),
       setCloseOnNeutral: (v) => set({ closeOnNeutral: v }),
       setRenewEveryCycle: (v) => set({ renewEveryCycle: v }),
+      setStopLossEnabled: (v) => set({ stopLossEnabled: v }),
+      // Clamp to a sensible range so users can't disable the SL via 0
+      // (use the toggle for that) or set absurdly wide values.
+      setSlAtrMult: (v) => set({ slAtrMult: Math.max(0.5, Math.min(5, v)) }),
       setOpenPosition: (p) => set({ openPosition: p }),
 
       setCurrentPrediction: (direction, confidence, signals, price) =>
