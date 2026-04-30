@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Card, StatCard } from '../components/common/Card';
-import { Input, Select } from '../components/common/Input';
+import { Input } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -13,7 +13,6 @@ import { cn, getErrorMessage } from '../lib/utils';
 import {
   fetchOrderbook,
   fetchOpenOrders,
-  fetchSymbols,
   fetchSymbolTradingRules,
   placeOrder,
   batchCancelOrders,
@@ -23,6 +22,7 @@ import { useSettingsStore } from '../store/settingsStore';
 import { useBotPnlStore } from '../store/botPnlStore';
 import { recommendMarketMakerBot } from '../api/aiAutoConfig';
 import { AutoConfigureButton } from '../components/common/AutoConfigureButton';
+import { SymbolSelector } from '../components/common/SymbolSelector';
 
 /**
  * ┌─────────────────────────────────────────────────────────────────────┐
@@ -109,7 +109,6 @@ export const MarketMakerBot: React.FC = () => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [bestBid, setBestBid] = useState<number>(0);
   const [bestAsk, setBestAsk] = useState<number>(0);
-  const [pairList, setPairList] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   // Decimal precision for the symbol currently selected — pulled from
   // exchange metadata at start so we round prices/quantities to valid
@@ -130,26 +129,6 @@ export const MarketMakerBot: React.FC = () => {
   // ── Logging helper. Bounded to MAX_LOG_ENTRIES. Newest first. ─────
   const pushLog = useCallback((type: LogEntry['type'], message: string) => {
     setLogs((prev) => [{ ts: nowMs(), type, message }, ...prev].slice(0, MAX_LOG_ENTRIES));
-  }, []);
-
-  // ── Initial pair list load. Pulls top spot symbols once on mount. ─
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const list = await fetchSymbols('spot');
-        if (cancelled) return;
-        const names = (list as Array<Record<string, unknown>>)
-          .map((s) => String(s.symbol ?? ''))
-          .filter(Boolean)
-          .slice(0, 50);
-        setPairList(names.length > 0 ? names : ['BTC_USDC', 'ETH_USDC', 'SOL_USDC']);
-      } catch {
-        // Fallback to a canned shortlist so the dropdown is never empty
-        setPairList(['BTC_USDC', 'ETH_USDC', 'SOL_USDC']);
-      }
-    })();
-    return () => { cancelled = true; };
   }, []);
 
   // ── Whenever the user picks a different pair, refresh the metadata
@@ -545,12 +524,12 @@ export const MarketMakerBot: React.FC = () => {
             <div className="text-[10px] uppercase tracking-widest font-bold text-text-muted">
               Pair &amp; Sizing
             </div>
-            <Select
+            <SymbolSelector
               label="Trading Pair"
               value={mm.symbol}
-              onChange={(e) => setField('symbol', e.target.value)}
+              onChange={(next) => setField('symbol', next)}
+              market="spot"
               disabled={isRunning}
-              options={pairList.map((s) => ({ value: s, label: s }))}
             />
             <Input
               label="Budget (USDT)"

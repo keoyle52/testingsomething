@@ -16,6 +16,7 @@ import { placeOrder, fetchBookTickers, fetchFeeRate, normalizeSymbol } from '../
 import type { FeeRateInfo } from '../api/services';
 import { recommendTwapBot } from '../api/aiAutoConfig';
 import { AutoConfigureButton } from '../components/common/AutoConfigureButton';
+import { SymbolSelector } from '../components/common/SymbolSelector';
 import { cn, getErrorMessage } from '../lib/utils';
 import { useBotPnlStore } from '../store/botPnlStore';
 
@@ -382,7 +383,12 @@ export const TwapBot: React.FC = () => {
           />
           {/* ── Market & direction ── */}
           <Section icon={<Hash size={12} />} label="Market & direction">
-            <Input label="Symbol" type="text" value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="BTC-USD" disabled={isRunning} />
+            <SymbolSelector
+              value={symbol}
+              onChange={setSymbol}
+              market={isSpot ? 'spot' : 'perps'}
+              disabled={isRunning}
+            />
             <div>
               <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-1.5">Market type</label>
               <div className="flex gap-2">

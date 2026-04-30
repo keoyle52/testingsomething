@@ -18,6 +18,7 @@ import {
   type PerpsSymbolMeta,
 } from '../api/services';
 import { buildContext, recommendGridBot } from '../api/aiAutoConfig';
+import { SymbolSelector } from '../components/common/SymbolSelector';
 import { cn, getErrorMessage } from '../lib/utils';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -693,18 +694,21 @@ export const GridBot: React.FC = () => {
           )}
           {/* ── Market ── */}
           <Section icon={<Layers size={12} />} label="Market">
-            <Input
-              label="Symbol"
-              type="text"
+            {/* Symbol picker pulls the live list from SoDEX. Auto-falls
+                back to canned defaults if the API is unreachable, and
+                auto-corrects when the user toggles spot↔perps so the
+                value never sits on a symbol the venue rejects. */}
+            <SymbolSelector
               value={state.symbol}
-              onChange={(e) => state.setField('symbol', e.target.value)}
+              onChange={(next) => state.setField('symbol', next)}
+              market={state.isSpot ? 'spot' : 'perps'}
               disabled={isLocked}
             />
             <div>
               <label className="block text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-1.5">Market type</label>
               <div className="flex gap-2">
                 <button
-                  onClick={() => { if (!isLocked) { state.setField('isSpot', true); state.setField('symbol', normalizeSymbol(state.symbol, 'spot')); } }}
+                  onClick={() => { if (!isLocked) state.setField('isSpot', true); }}
                   className={cn(
                     'flex-1 py-2 text-xs rounded-lg border transition-all',
                     state.isSpot ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-background/40 text-text-muted hover:border-border-hover',
@@ -712,7 +716,7 @@ export const GridBot: React.FC = () => {
                   )}
                 >Spot</button>
                 <button
-                  onClick={() => { if (!isLocked) { state.setField('isSpot', false); state.setField('symbol', normalizeSymbol(state.symbol, 'perps')); } }}
+                  onClick={() => { if (!isLocked) state.setField('isSpot', false); }}
                   className={cn(
                     'flex-1 py-2 text-xs rounded-lg border transition-all',
                     !state.isSpot ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-background/40 text-text-muted hover:border-border-hover',
