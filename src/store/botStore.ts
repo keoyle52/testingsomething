@@ -41,8 +41,87 @@ interface GridBotState {
   resetStats: () => void;
 }
 
+/**
+ * Market Maker Bot — high-volume, low-fee farming bot.
+ *
+ * Designed to maximise traded volume per dollar of fee spent. The
+ * mechanism:
+ *  1. Posts paired buy + sell **limit orders** with `timeInForce: GTX`
+ *     (post-only). The exchange REJECTS any side that would cross the
+ *     spread, guaranteeing every fill is a MAKER fill — typically half
+ *     the fee of a TAKER order on SoDEX.
+ *  2. As the market wiggles, one side gets filled, leaving small
+ *     inventory. The bot re-posts the opposite side at the new BBO
+ *     to flatten and continue the cycle.
+ *  3. Stale orders (price moved beyond `requoteBps`) are cancelled
+ *     and re-quoted at the current BBO so we don't sit too far back
+ *     from the queue and miss fills.
+ *
+ * Caps that protect the user:
+ *  - `budgetUsdt`: collateral committed at any moment (open orders +
+ *                  unhedged inventory).
+ *  - `volumeTargetUsdt`: stops the bot when traded volume reaches this.
+ *  - `feeBudgetUsdt`: stops the bot when estimated fees reach this.
+ *
+ * The bot is spot-only — perps would add inventory leverage tracking,
+ * orthogonal complexity. SoDEX's airdrop volume metric reportedly
+ * counts spot trades equally so spot is the right surface for farming.
+ */
+interface MarketMakerBotState {
+  // ── Configuration ─────────────────────────────────────────────
+  /** Spot trading pair, e.g. BTC_USDC. */
+  symbol: string;
+  /** Maximum capital (in USDT-equivalent) the bot may have committed
+   *  to open orders + inventory at any moment. Hard ceiling. */
+  budgetUsdt: string;
+  /** USDT-equivalent notional per individual limit order. Each ladder
+   *  layer uses this size. Smaller = smoother cycles, more orders. */
+  orderSizeUsdt: string;
+  /** Number of buy + sell layers to keep open simultaneously. 1 = pure
+   *  ping-pong; 3 = small ladder. Keep low to avoid rate-limit pressure. */
+  layers: string;
+  /** Spread offset in basis points from BBO. 0 = join the queue at
+   *  current bid/ask; 5 = step inside by 5 bps (fills slower but
+   *  smaller adverse selection). */
+  spreadBps: string;
+  /** Re-quote when the BBO moves more than this many bps from our
+   *  posted price. Lower = more cancel/replace cycles + more taker
+   *  risk if not careful. Higher = stale-order risk. */
+  requoteBps: string;
+  /** Optional volume target (USDT). Bot auto-stops when reached.
+   *  Empty string = no cap. */
+  volumeTargetUsdt: string;
+  /** Optional fee budget (USDT). Bot auto-stops when estimated cumul-
+   *  ative maker fee reaches this. Empty string = no cap. */
+  feeBudgetUsdt: string;
+  /** SoDEX maker fee rate as a decimal (e.g. 0.0001 = 1bp). Used only
+   *  for the fee estimator since the API doesn't reliably echo per-fill
+   *  fee. Default 0.0001 (1bp) is a safe assumption for most makers. */
+  makerFeeRate: string;
+
+  // ── Live status ───────────────────────────────────────────────
+  status: 'STOPPED' | 'RUNNING' | 'ERROR';
+  /** Stats since the most recent Start press. */
+  ordersPlaced: number;
+  ordersFilled: number;
+  ordersCancelled: number;
+  /** Cumulative traded volume in USDT (sum of fill qty × fill price). */
+  volumeUsdt: number;
+  /** Estimated cumulative maker fee paid in USDT. */
+  feesUsdt: number;
+  /** Net inventory (in base asset units). Positive = long, negative = short. */
+  inventoryBase: number;
+  /** Wall-clock when the current run started. null = idle. */
+  sessionStartedAt: number | null;
+
+  // ── Setters ───────────────────────────────────────────────────
+  setField: <K extends keyof MarketMakerBotState>(field: K, value: MarketMakerBotState[K]) => void;
+  resetStats: () => void;
+}
+
 interface BotStoreState {
   gridBot: GridBotState;
+  marketMakerBot: MarketMakerBotState;
 }
 
 export const useBotStore = create<BotStoreState>((set) => ({
@@ -79,6 +158,48 @@ export const useBotStore = create<BotStoreState>((set) => ({
           completedGrids: 0,
           realizedPnl: 0,
           status: 'STOPPED'
+        },
+      })),
+  },
+  // Defaults tuned for a quick-start, low-risk farming session on BTC.
+  // 100 USDT budget × 10 USDT per order × 2 layers ≈ 4 active orders
+  // worth 40 USDT. With ~1bp maker fee and ~0.05% per BTC tick, the
+  // bot will turn over the budget many times per hour at fee cost
+  // well under 0.1% of farmed volume.
+  marketMakerBot: {
+    symbol: 'BTC_USDC',
+    budgetUsdt: '100',
+    orderSizeUsdt: '10',
+    layers: '2',
+    spreadBps: '0',         // join the BBO
+    requoteBps: '5',        // re-quote when 5bps off
+    volumeTargetUsdt: '',
+    feeBudgetUsdt: '',
+    makerFeeRate: '0.0001', // 1bp default
+    status: 'STOPPED',
+    ordersPlaced: 0,
+    ordersFilled: 0,
+    ordersCancelled: 0,
+    volumeUsdt: 0,
+    feesUsdt: 0,
+    inventoryBase: 0,
+    sessionStartedAt: null,
+    setField: (field, value) =>
+      set((state) => ({
+        marketMakerBot: { ...state.marketMakerBot, [field]: value },
+      })),
+    resetStats: () =>
+      set((state) => ({
+        marketMakerBot: {
+          ...state.marketMakerBot,
+          status: 'STOPPED',
+          ordersPlaced: 0,
+          ordersFilled: 0,
+          ordersCancelled: 0,
+          volumeUsdt: 0,
+          feesUsdt: 0,
+          inventoryBase: 0,
+          sessionStartedAt: null,
         },
       })),
   },

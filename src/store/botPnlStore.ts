@@ -5,7 +5,7 @@ import { persist } from 'zustand/middleware';
  * Identifier for every bot variant the terminal can run. Kept narrow so
  * the dashboard widget can render a stable per-bot stat strip.
  */
-export type BotKey = 'grid' | 'twap' | 'dca' | 'news' | 'predictor' | 'copy';
+export type BotKey = 'grid' | 'twap' | 'dca' | 'news' | 'predictor' | 'copy' | 'marketmaker';
 
 export interface BotTrade {
   /** Always positive when winning, negative when losing. */
@@ -59,6 +59,7 @@ const initialBots: Record<BotKey, BotStats> = {
   news: emptyStats(),
   predictor: emptyStats(),
   copy: emptyStats(),
+  marketmaker: emptyStats(),
 };
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -128,10 +129,11 @@ export function getWinRate(stats: BotStats): number {
  * so the type-checker enforces exhaustiveness.
  */
 export const BOT_LABELS: Record<BotKey, string> = {
-  grid:      'Grid Bot',
-  twap:      'TWAP Bot',
-  dca:       'DCA Bot',
-  news:      'News Bot',
-  predictor: 'BTC Predictor',
-  copy:      'Copy Trader',
+  grid:        'Grid Bot',
+  twap:        'TWAP Bot',
+  dca:         'DCA Bot',
+  news:        'News Bot',
+  predictor:   'BTC Predictor',
+  copy:        'Copy Trader',
+  marketmaker: 'Market Maker',
 };
