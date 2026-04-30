@@ -1,4 +1,5 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Wallet,
   TrendingUp,
@@ -7,11 +8,14 @@ import {
   Layers,
   ArrowUpRight,
   ArrowDownRight,
+  Sparkles,
+  Zap,
 } from 'lucide-react';
 import { NumberDisplay } from '../components/common/NumberDisplay';
-import { StatCard } from '../components/common/Card';
+import { StatCard, Card } from '../components/common/Card';
 import { TradingChart } from '../components/TradingChart';
 import { useSettingsStore } from '../store/settingsStore';
+import { usePredictorStore } from '../store/predictorStore';
 import {
   fetchBalances,
   fetchPositions,
@@ -19,6 +23,15 @@ import {
   fetchMarkPrices,
 } from '../api/services';
 import { useLiveTicker } from '../api/useLiveTicker';
+import {
+  classifyRegime,
+  recommendBot,
+  recommendationLink,
+  regimeLabel,
+  botLabel,
+  type RegimeInputs,
+} from '../api/aiOrchestrator';
+import { cn } from '../lib/utils';
 
 interface TickerRow {
   symbol: string;
@@ -29,6 +42,12 @@ interface TickerRow {
 
 export const Dashboard: React.FC = () => {
   const { privateKey, defaultSymbol, isTestnet, isDemoMode } = useSettingsStore();
+  // Pull current Predictor signals so the AI Orchestrator can use the
+  // technical features (ATR, EMA, MACD) without re-fetching klines.
+  // When the Predictor hasn't run yet (currentSignals === null) we
+  // fall back to a "Run Predictor first" recommendation card.
+  const predictorSignals = usePredictorStore((s) => s.currentSignals);
+  const aiVerdict        = usePredictorStore((s) => s.aiVerdict);
   // A private key is sufficient to authenticate account endpoints:
   //  - Testnet: the key IS the master wallet.
   //  - Mainnet: the key is the API-key private key; the master EVM address
@@ -121,6 +140,33 @@ export const Dashboard: React.FC = () => {
     return value.toFixed(2);
   }
 
+  // ── AI Strategy Orchestrator recommendation ──────────────────────
+  // Compose the regime inputs from already-fetched data: predictor
+  // signals (ATR, EMA, MACD, news count) + ticker 24h change. No
+  // additional API calls are made here — the recommendation is
+  // computed synchronously per render and re-evaluated whenever the
+  // dependent inputs change.
+  const btcTicker = useMemo(
+    () => tickers.find((t) => /^BTC[-_]/.test(t.symbol)),
+    [tickers],
+  );
+  const recommendation = useMemo(() => {
+    if (!btcTicker) return null;
+    const inputs: RegimeInputs = {
+      atrPct:        predictorSignals?.atrPct ?? 0.10,           // sane default if predictor idle
+      change24hPct:  btcTicker.change24h,
+      fundingRate:   predictorSignals?.fundingRate ?? 0,
+      emaSignal:     predictorSignals?.emaSignal ?? 0,
+      macdSignal:    predictorSignals?.macdSignal ?? 0,
+      newsSentiment: predictorSignals?.newsSentiment ?? 0,
+      // recentNewsCount unavailable here — fed only when AI Console
+      // calls the orchestrator with fresh state.
+      aiConfidence:  aiVerdict?.confidence,
+    };
+    const rec = recommendBot(inputs, btcTicker.lastPrice);
+    return { rec, link: recommendationLink(rec), regime: classifyRegime(inputs) };
+  }, [btcTicker, predictorSignals, aiVerdict]);
+
   return (
     <div className="p-4 md:p-6 flex flex-col gap-4 md:gap-5 h-[calc(100vh-52px)] overflow-y-auto">
       {/* Demo Mode Banner */}
@@ -178,6 +224,83 @@ export const Dashboard: React.FC = () => {
             icon={<BarChart3 size={16} />}
           />
         </div>
+      )}
+
+      {/* AI Strategy Orchestrator — "Today's Setup" recommendation */}
+      {recommendation && (
+        <Card className="p-4 border-2 border-fuchsia-500/30 bg-gradient-to-br from-fuchsia-500/5 via-violet-500/3 to-cyan-500/5 shrink-0">
+          <div className="flex items-start gap-4 flex-wrap">
+            {/* Brand block */}
+            <div className="flex items-center gap-3 min-w-[200px]">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500/30 via-violet-500/25 to-cyan-400/30 border border-fuchsia-400/40 shadow-[0_0_12px_rgba(217,70,239,0.35)] flex items-center justify-center">
+                <Sparkles size={18} className="text-fuchsia-200 drop-shadow-[0_0_4px_rgba(217,70,239,0.8)]" />
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-widest font-bold bg-gradient-to-r from-fuchsia-300 via-violet-300 to-cyan-300 bg-clip-text text-transparent">
+                  AI Strategy Setup
+                </div>
+                <div className="text-xs text-text-muted mt-0.5">
+                  Bugün için önerilen bot
+                </div>
+              </div>
+            </div>
+
+            {/* Regime + bot pick */}
+            <div className="flex-1 flex items-center gap-4 flex-wrap">
+              <div className="flex flex-col items-start min-w-[120px]">
+                <span className="text-[9px] text-text-muted uppercase tracking-widest">Rejim</span>
+                <span className="text-sm font-bold text-text-primary mt-0.5">
+                  {regimeLabel(recommendation.regime)}
+                </span>
+              </div>
+              <div className="flex flex-col items-start min-w-[140px]">
+                <span className="text-[9px] text-text-muted uppercase tracking-widest">Önerilen bot</span>
+                <span className="text-sm font-bold text-fuchsia-300 mt-0.5">
+                  {botLabel(recommendation.rec.bot)}
+                </span>
+              </div>
+              <div className="flex flex-col items-start min-w-[80px]">
+                <span className="text-[9px] text-text-muted uppercase tracking-widest">Güven</span>
+                <span className="text-sm font-bold font-mono text-cyan-300 mt-0.5">
+                  {recommendation.rec.confidence}%
+                </span>
+              </div>
+            </div>
+
+            {/* Deploy CTA */}
+            <Link
+              to={recommendation.link}
+              className={cn(
+                'inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold',
+                'bg-gradient-to-r from-fuchsia-500 to-violet-500 text-white',
+                'hover:from-fuchsia-400 hover:to-violet-400',
+                'shadow-[0_0_15px_rgba(217,70,239,0.4)]',
+                'transition-all duration-200 hover:shadow-[0_0_20px_rgba(217,70,239,0.6)]',
+              )}
+            >
+              <Zap size={14} />
+              Deploy {botLabel(recommendation.rec.bot)}
+            </Link>
+          </div>
+
+          {/* Rationale */}
+          <p className="mt-3 pt-3 border-t border-fuchsia-500/20 text-[12px] text-text-secondary leading-relaxed italic">
+            &quot;{recommendation.rec.rationale}&quot;
+          </p>
+
+          {/* Alternative pick — soft suggestion in case the user prefers
+              a different style */}
+          {recommendation.rec.alternative && (
+            <div className="mt-2 text-[11px] text-text-muted flex items-start gap-2">
+              <span className="text-amber-400/70 shrink-0">↳ Alternatif:</span>
+              <span>
+                <strong className="text-text-secondary">{botLabel(recommendation.rec.alternative.bot)}</strong>
+                {' — '}
+                {recommendation.rec.alternative.reason}
+              </span>
+            </div>
+          )}
+        </Card>
       )}
 
       {/* Chart */}

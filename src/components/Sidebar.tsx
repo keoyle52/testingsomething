@@ -4,6 +4,7 @@ import {
   LayoutDashboard, Grid2X2, Clock, Repeat, Users, LineChart, Coins, 
   TimerOff, Bell, FlaskConical, Settings, Zap, BarChart2, Bot, Wrench, Brain,
   Sparkles, Newspaper, Calendar, Building, Banknote, Flame, Building2,
+  MessageSquare,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -16,8 +17,9 @@ const NAV_MENU = [
     icon: Brain,
     label: 'AI Tools',
     items: [
-      { to: '/btc-predictor', icon: Brain,     label: 'BTC Predictor' },
-      { to: '/news-bot',      icon: Newspaper, label: 'News Bot'      },
+      { to: '/ai-console',    icon: MessageSquare, label: 'AI Console'    },
+      { to: '/btc-predictor', icon: Brain,         label: 'BTC Predictor' },
+      { to: '/news-bot',      icon: Newspaper,     label: 'News Bot'      },
     ]
   },
   {

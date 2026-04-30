@@ -3,12 +3,14 @@ import {
   Brain, TrendingUp, TrendingDown, Minus, RefreshCw,
   CheckCircle2, XCircle, SkipForward, Target, Clock,
   Activity, Newspaper, BarChart3, Zap, AlertTriangle, Wallet,
+  Sparkles, AlertCircle,
 } from 'lucide-react';
 import { fetchKlines, fetchTickers, fetchOrderbook, fetchFundingRates, placeOrder, updatePerpsLeverage } from '../api/services';
 import { useLiveTicker, type LiveTicker } from '../api/useLiveTicker';
 import { fetchSosoNews, fetchEtfCurrentMetrics, getNewsTitle } from '../api/sosoServices';
 import { aggregateInstitutionalBtcFlow } from '../api/sosoExtraServices';
 import { analyzeSentiment } from '../api/geminiClient';
+import { callAiStrategist, type StrategistVerdict } from '../api/aiStrategist';
 import { useSettingsStore } from '../store/settingsStore';
 import { useBotPnlStore } from '../store/botPnlStore';
 import {
@@ -506,8 +508,10 @@ export const BtcPredictor: React.FC = () => {
     setCurrentPrediction, resolvePrediction, addHistoryEntry, resetStats,
     autoTradeEnabled, tradeAmountUsdt, tradeLeverage, closeOnNeutral, renewEveryCycle,
     stopLossEnabled, slAtrMult,
+    aiStrategistEnabled, aiSizeAdjustEnabled, aiSkipOnDisagree, aiVerdict,
     setAutoTradeEnabled, setTradeAmountUsdt, setTradeLeverage, setCloseOnNeutral, setRenewEveryCycle,
     setStopLossEnabled, setSlAtrMult,
+    setAiStrategistEnabled, setAiSizeAdjustEnabled, setAiSkipOnDisagree, setAiVerdict,
     openPosition, setOpenPosition,
   } = usePredictorStore();
 
@@ -717,6 +721,13 @@ export const BtcPredictor: React.FC = () => {
   const stopLossEnabledRef  = useRef(stopLossEnabled);
   const slAtrMultRef        = useRef(slAtrMult);
   const lastAtrPctRef       = useRef(0);
+  // AI Strategist refs — read inside `runPredictionCycle` and the auto-
+  // trade size logic so toggling the user-facing checkboxes mid-cycle
+  // takes effect on the very next decision without a re-render.
+  const aiStrategistEnabledRef = useRef(aiStrategistEnabled);
+  const aiSizeAdjustEnabledRef = useRef(aiSizeAdjustEnabled);
+  const aiSkipOnDisagreeRef    = useRef(aiSkipOnDisagree);
+  const aiVerdictRef           = useRef<StrategistVerdict | null>(null);
   useEffect(() => { autoTradeEnabledRef.current = autoTradeEnabled; }, [autoTradeEnabled]);
   useEffect(() => { tradeAmountUsdtRef.current  = tradeAmountUsdt;  }, [tradeAmountUsdt]);
   useEffect(() => { tradeLeverageRef.current    = tradeLeverage;    }, [tradeLeverage]);
@@ -725,6 +736,10 @@ export const BtcPredictor: React.FC = () => {
   useEffect(() => { stopLossEnabledRef.current  = stopLossEnabled;  }, [stopLossEnabled]);
   useEffect(() => { slAtrMultRef.current        = slAtrMult;        }, [slAtrMult]);
   useEffect(() => { lastAtrPctRef.current       = lastAtrPct;       }, [lastAtrPct]);
+  useEffect(() => { aiStrategistEnabledRef.current = aiStrategistEnabled; }, [aiStrategistEnabled]);
+  useEffect(() => { aiSizeAdjustEnabledRef.current = aiSizeAdjustEnabled; }, [aiSizeAdjustEnabled]);
+  useEffect(() => { aiSkipOnDisagreeRef.current    = aiSkipOnDisagree;    }, [aiSkipOnDisagree]);
+  useEffect(() => { aiVerdictRef.current           = aiVerdict;           }, [aiVerdict]);
   useEffect(() => { openPositionRef.current     = openPosition;     }, [openPosition]);
 
   /**
@@ -836,8 +851,8 @@ export const BtcPredictor: React.FC = () => {
       toast.error('Auto-trade: BTC symbol not resolved yet');
       return;
     }
-    const usdtNum = parseFloat(usdtStr);
-    if (!Number.isFinite(usdtNum) || usdtNum <= 0) {
+    const usdtNumRaw = parseFloat(usdtStr);
+    if (!Number.isFinite(usdtNumRaw) || usdtNumRaw <= 0) {
       toast.error(`Auto-trade: invalid USDT amount "${usdtStr}"`);
       return;
     }
@@ -845,6 +860,26 @@ export const BtcPredictor: React.FC = () => {
       toast.error('Auto-trade: BTC price unavailable');
       return;
     }
+
+    // ── AI Strategist size adjustment ──────────────────────────────
+    // When `aiSizeAdjustEnabled` is on and the latest verdict has a
+    // sizeMultiplier < 1, scale the user's notional down. A multiplier
+    // of 0 means "skip this trade entirely" — typically because the
+    // verdict was HOLD or had very low confidence. The rule-based
+    // direction is unaffected; sizing only.
+    const verdict = aiVerdictRef.current;
+    const sizeMul = aiSizeAdjustEnabledRef.current && verdict
+      ? Math.max(0, Math.min(1, verdict.sizeMultiplier))
+      : 1;
+    if (sizeMul <= 0) {
+      toast(`AI sized this trade to 0 — skipping (${verdict?.decision})`, { icon: '🤖' });
+      return;
+    }
+    const usdtNum = +(usdtNumRaw * sizeMul).toFixed(2);
+    if (sizeMul < 1) {
+      toast(`AI sized down: ${usdtNumRaw}→${usdtNum} USDT (${(sizeMul * 100).toFixed(0)}%)`, { icon: '🤖' });
+    }
+
     // Convert USDT notional → BTC quantity. Round to 4 decimals which is
     // safely within typical SoDEX BTC step size (0.0001). Exchange will
     // re-round if needed via placePerpsOrder normalisation.
@@ -1139,6 +1174,57 @@ export const BtcPredictor: React.FC = () => {
         totalSignals,
         neutralReason,
       };
+
+      // ── AI Strategist overlay ────────────────────────────────────
+      // Independent second-opinion from a Gemini-2.5 prompt that ingests
+      // the full signal payload. The overlay never overrides the rule-
+      // based direction silently — it can only:
+      //   1. Surface a holistic narrative for the UI ("LLM as brain"
+      //      requirement from the SoSoValue Buildathon kickoff).
+      //   2. SKIP the trade when opposite-direction (skip-on-disagree).
+      //   3. DAMPEN the order size when sizeMultiplier < 1 (size-adjust).
+      //
+      // Demo mode + no-key path resolve to a deterministic synth so the
+      // jury sees the AI card working without paying for tokens. See
+      // `src/api/aiStrategist.ts` for the contract.
+      let strategistVerdict: StrategistVerdict | null = null;
+      if (aiStrategistEnabledRef.current) {
+        try {
+          strategistVerdict = await callAiStrategist(signals, price);
+          setAiVerdict(strategistVerdict);
+        } catch (err) {
+          // The Strategist module catches internally and returns a
+          // synth on any failure, but defence-in-depth here keeps the
+          // cycle running even if the call itself throws.
+          console.warn('[Predictor] AI Strategist threw, ignoring:', err);
+          strategistVerdict = null;
+        }
+      } else {
+        // Toggle was off — clear any stale verdict so the UI doesn't
+        // show outdated rationale from a previous run.
+        setAiVerdict(null);
+      }
+
+      // ── Skip-on-disagree gate ────────────────────────────────────
+      // Only opposite-direction disagreements skip. HOLD verdict does
+      // not skip — the rule-based ensemble usually has high enough
+      // conviction that we trust it when the LLM can't commit.
+      let aiSkipped = false;
+      if (
+        aiSkipOnDisagreeRef.current &&
+        strategistVerdict &&
+        direction !== 'NEUTRAL' &&
+        ((direction === 'UP'   && strategistVerdict.decision === 'SHORT') ||
+         (direction === 'DOWN' && strategistVerdict.decision === 'LONG'))
+      ) {
+        aiSkipped = true;
+        direction = 'NEUTRAL';
+      }
+      if (aiSkipped) {
+        // Annotate the existing console log so the F12 debug stream
+        // shows the AI override.
+        console.log('[Predictor]   ↳ AI veto: ', strategistVerdict?.decision, '—', strategistVerdict?.rationale);
+      }
 
       setCurrentPrediction(direction, confidence, signals, price);
 
@@ -1501,6 +1587,166 @@ export const BtcPredictor: React.FC = () => {
           </span>
         )}
       </div>
+
+      {/* ── AI Strategist (multi-source LLM consensus) ──
+          Surfaces an independent second-opinion verdict from Gemini-2.5
+          (or a deterministic synth in demo / no-key mode). The card is
+          decision-only — wiring to actual order placement happens via
+          the `aiSizeAdjustEnabled` and `aiSkipOnDisagree` toggles in
+          the Auto-Trade panel below. */}
+      {aiStrategistEnabled && (
+        <Card className="p-4 border-2 border-fuchsia-500/30 bg-gradient-to-br from-fuchsia-500/5 via-violet-500/3 to-cyan-500/5">
+          <div className="flex items-start gap-3 flex-wrap">
+            {/* Left: brand + decision pill */}
+            <div className="flex items-center gap-3 min-w-[200px]">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500/30 via-violet-500/25 to-cyan-400/30 border border-fuchsia-400/40 shadow-[0_0_12px_rgba(217,70,239,0.35)] flex items-center justify-center">
+                <Sparkles size={18} className="text-fuchsia-200 drop-shadow-[0_0_4px_rgba(217,70,239,0.8)]" />
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-widest font-bold bg-gradient-to-r from-fuchsia-300 via-violet-300 to-cyan-300 bg-clip-text text-transparent">
+                  AI Strategist
+                </div>
+                <div className="text-xs text-text-muted mt-0.5">
+                  Multi-source LLM consensus
+                </div>
+              </div>
+            </div>
+
+            {/* Middle: verdict block (decision + confidence + size mul) */}
+            <div className="flex-1 flex items-center gap-4 flex-wrap">
+              {aiVerdict ? (
+                <>
+                  <div className="flex flex-col items-center min-w-[80px]">
+                    <span className={cn(
+                      'text-base font-bold',
+                      aiVerdict.decision === 'LONG'  ? 'text-emerald-400' :
+                      aiVerdict.decision === 'SHORT' ? 'text-red-400' :
+                      'text-text-muted',
+                    )}>
+                      {aiVerdict.decision}
+                    </span>
+                    <span className="text-[9px] text-text-muted uppercase">verdict</span>
+                  </div>
+                  <div className="flex flex-col items-center min-w-[70px]">
+                    <span className="text-base font-bold font-mono text-fuchsia-300">
+                      {aiVerdict.confidence}%
+                    </span>
+                    <span className="text-[9px] text-text-muted uppercase">confidence</span>
+                  </div>
+                  <div className="flex flex-col items-center min-w-[70px]">
+                    <span className="text-base font-bold font-mono text-cyan-300">
+                      {(aiVerdict.sizeMultiplier * 100).toFixed(0)}%
+                    </span>
+                    <span className="text-[9px] text-text-muted uppercase">size mul</span>
+                  </div>
+                  {/* Agreement / disagreement vs rule-based decision */}
+                  {currentPrediction !== 'NEUTRAL' && (
+                    <div className="flex flex-col items-center min-w-[80px]">
+                      <span className={cn(
+                        'text-xs font-bold',
+                        ((currentPrediction === 'UP'   && aiVerdict.decision === 'LONG') ||
+                         (currentPrediction === 'DOWN' && aiVerdict.decision === 'SHORT'))
+                          ? 'text-emerald-400'
+                          : aiVerdict.decision === 'HOLD'
+                            ? 'text-amber-400'
+                            : 'text-red-400',
+                      )}>
+                        {((currentPrediction === 'UP'   && aiVerdict.decision === 'LONG') ||
+                          (currentPrediction === 'DOWN' && aiVerdict.decision === 'SHORT'))
+                          ? '✓ AGREE'
+                          : aiVerdict.decision === 'HOLD'
+                            ? '~ NEUTRAL'
+                            : '✗ DISAGREE'}
+                      </span>
+                      <span className="text-[9px] text-text-muted uppercase">vs ensemble</span>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <span className="text-xs text-text-muted italic">
+                  Awaiting first cycle… ({isRunning ? 'next verdict in 5 min' : 'press Start to begin'})
+                </span>
+              )}
+            </div>
+
+            {/* Right: source badge */}
+            {aiVerdict && (
+              <div className={cn(
+                'text-[10px] font-mono px-2 py-1 rounded shrink-0',
+                aiVerdict.source === 'gemini'       ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' :
+                aiVerdict.source === 'demo'         ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30' :
+                aiVerdict.source === 'parse_error'  ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' :
+                                                      'bg-red-500/15 text-red-400 border border-red-500/30',
+              )}>
+                {aiVerdict.source === 'gemini'      ? '◉ GEMINI 2.5' :
+                 aiVerdict.source === 'demo'        ? '◯ DEMO SYNTH' :
+                 aiVerdict.source === 'parse_error' ? '⚠ PARSE FAIL' :
+                                                     '⚠ UNAVAILABLE'}
+              </div>
+            )}
+          </div>
+
+          {/* Rationale block — full-width plain English narrative, the
+              "AI as brain" moment for the jury. */}
+          {aiVerdict && (
+            <div className="mt-3 pt-3 border-t border-fuchsia-500/20">
+              <div className="flex items-start gap-2">
+                <AlertCircle size={13} className="shrink-0 mt-0.5 text-fuchsia-400/70" />
+                <p className="text-[12px] text-text-secondary leading-relaxed italic">
+                  &quot;{aiVerdict.rationale}&quot;
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Toggle row: enable size-adjust + skip-on-disagree at the
+              card level so users don't have to scroll to the auto-trade
+              panel to tune the AI's authority. */}
+          <div className="mt-3 pt-3 border-t border-fuchsia-500/20 flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px]">
+            <label className="flex items-center gap-1.5 cursor-pointer text-text-secondary hover:text-text-primary transition" title="When checked, the trade size is multiplied by the AI's sizeMultiplier (0.5 = half size, 0 = skip). Direction is never overridden.">
+              <input
+                type="checkbox"
+                checked={aiSizeAdjustEnabled}
+                onChange={(e) => setAiSizeAdjustEnabled(e.target.checked)}
+                className="accent-fuchsia-500"
+              />
+              <span>Apply size multiplier</span>
+            </label>
+            <label className="flex items-center gap-1.5 cursor-pointer text-text-secondary hover:text-text-primary transition" title="When checked, the bot SKIPS trades where the AI verdict is opposite to the rule-based direction. HOLD verdicts do NOT skip.">
+              <input
+                type="checkbox"
+                checked={aiSkipOnDisagree}
+                onChange={(e) => setAiSkipOnDisagree(e.target.checked)}
+                className="accent-fuchsia-500"
+              />
+              <span>Skip when AI disagrees</span>
+            </label>
+            <label className="ml-auto flex items-center gap-1.5 cursor-pointer text-text-muted hover:text-text-secondary transition">
+              <input
+                type="checkbox"
+                checked={aiStrategistEnabled}
+                onChange={(e) => setAiStrategistEnabled(e.target.checked)}
+                className="accent-fuchsia-500"
+              />
+              <span>Enable AI Strategist</span>
+            </label>
+          </div>
+        </Card>
+      )}
+      {/* When AI Strategist is OFF, show a subtle "enable me" prompt so
+          the feature is discoverable but doesn't add noise when active. */}
+      {!aiStrategistEnabled && (
+        <Card className="p-3 border border-dashed border-fuchsia-500/30 bg-fuchsia-500/3">
+          <button
+            type="button"
+            onClick={() => setAiStrategistEnabled(true)}
+            className="flex items-center gap-2 text-xs text-fuchsia-300 hover:text-fuchsia-200 transition w-full"
+          >
+            <Sparkles size={14} />
+            <span>Enable <strong>AI Strategist</strong> overlay — adds an LLM consensus verdict to every cycle (free in demo mode).</span>
+          </button>
+        </Card>
+      )}
 
       {/* ── Auto-Trade settings (collapsed by default) ── */}
       <Card className="p-4">

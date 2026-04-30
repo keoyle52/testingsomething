@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import type { StrategistVerdict } from '../api/aiStrategist';
 
 export type PredictionDirection = 'UP' | 'DOWN' | 'NEUTRAL';
 export type PredictionResult = 'CORRECT' | 'WRONG' | 'SKIPPED' | 'PENDING';
@@ -112,6 +113,25 @@ interface PredictorState {
    *  enough to avoid noise stop-outs in calm regimes. */
   slAtrMult: number;
 
+  // ── AI Strategist overlay ─────────────────────────────────────────
+  /** When true, every cycle calls the AI Strategist (Gemini or demo
+   *  synth) and the verdict is surfaced in the Predictor UI. Default ON
+   *  because the demo synth has zero cost and adds the "AI brain"
+   *  narrative the workshop emphasised. */
+  aiStrategistEnabled: boolean;
+  /** When true, the auto-trade order size is multiplied by the
+   *  Strategist's `sizeMultiplier`. 0.5 = half size, 0 = skip the
+   *  trade entirely. Lets the LLM act as a risk-overlay without ever
+   *  giving it the power to flip the rule-based direction. */
+  aiSizeAdjustEnabled: boolean;
+  /** When true, the bot SKIPS the trade if the Strategist's decision
+   *  contradicts the rule-based direction (LONG vs SHORT). HOLD does
+   *  NOT skip — only opposite-direction disagreements. */
+  aiSkipOnDisagree: boolean;
+  /** Latest verdict — refreshed each cycle. null until the first cycle
+   *  resolves. NOT persisted (always fresh on app reload). */
+  aiVerdict: StrategistVerdict | null;
+
   // ── Currently open bot-managed position ──
   openPosition: OpenPosition | null;
 
@@ -127,6 +147,10 @@ interface PredictorState {
   setRenewEveryCycle: (v: boolean) => void;
   setStopLossEnabled: (v: boolean) => void;
   setSlAtrMult: (v: number) => void;
+  setAiStrategistEnabled: (v: boolean) => void;
+  setAiSizeAdjustEnabled: (v: boolean) => void;
+  setAiSkipOnDisagree: (v: boolean) => void;
+  setAiVerdict: (v: StrategistVerdict | null) => void;
   setOpenPosition: (p: OpenPosition | null) => void;
 }
 
@@ -180,6 +204,14 @@ export const usePredictorStore = create<PredictorState>()(
       // before it ran the full cycle.
       stopLossEnabled: true,
       slAtrMult: 1.5,
+      // AI Strategist defaults: ON (zero-cost demo synth covers no-key
+      // case), size adjust ON (LLM can dampen sizing on weak verdicts),
+      // skip-on-disagree OFF (jury wants to see the bot trade — disagree
+      // skip can be too restrictive in noisy real-time markets).
+      aiStrategistEnabled: true,
+      aiSizeAdjustEnabled: true,
+      aiSkipOnDisagree: false,
+      aiVerdict: null,
       openPosition: null,
 
       setAutoTradeEnabled: (v) => set({ autoTradeEnabled: v }),
@@ -192,6 +224,10 @@ export const usePredictorStore = create<PredictorState>()(
       // Clamp to a sensible range so users can't disable the SL via 0
       // (use the toggle for that) or set absurdly wide values.
       setSlAtrMult: (v) => set({ slAtrMult: Math.max(0.5, Math.min(5, v)) }),
+      setAiStrategistEnabled: (v) => set({ aiStrategistEnabled: v }),
+      setAiSizeAdjustEnabled: (v) => set({ aiSizeAdjustEnabled: v }),
+      setAiSkipOnDisagree: (v) => set({ aiSkipOnDisagree: v }),
+      setAiVerdict: (v) => set({ aiVerdict: v }),
       setOpenPosition: (p) => set({ openPosition: p }),
 
       setCurrentPrediction: (direction, confidence, signals, price) =>
@@ -260,6 +296,11 @@ export const usePredictorStore = create<PredictorState>()(
         closeOnNeutral: s.closeOnNeutral,
         renewEveryCycle: s.renewEveryCycle,
         openPosition: s.openPosition,
+        // AI Strategist settings persist; the verdict itself does not
+        // (always recomputed on next cycle from fresh signals).
+        aiStrategistEnabled: s.aiStrategistEnabled,
+        aiSizeAdjustEnabled: s.aiSizeAdjustEnabled,
+        aiSkipOnDisagree: s.aiSkipOnDisagree,
       }),
     },
   ),
