@@ -3,6 +3,7 @@ import toast from 'react-hot-toast';
 import {
   Play, Square, Layers, DollarSign, CheckCircle2, TrendingUp, Grid2X2,
   ChevronDown, ChevronUp, AlertTriangle, Zap, Info, Target, ShieldAlert,
+  Sparkles,
 } from 'lucide-react';
 import { useBotStore } from '../store/botStore';
 import { useSettingsStore } from '../store/settingsStore';
@@ -16,6 +17,7 @@ import {
   getPerpsSymbolMeta,
   type PerpsSymbolMeta,
 } from '../api/services';
+import { buildContext, recommendGridBot } from '../api/aiAutoConfig';
 import { cn, getErrorMessage } from '../lib/utils';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -510,6 +512,36 @@ export const GridBot: React.FC = () => {
   const isArmed = state.status === 'ARMED';
   const isLocked = isRunning || isArmed;
 
+  // ── AI Auto-Configure ─────────────────────────────────────────────
+  // Pulls a 24h kline + L1 book snapshot, classifies volatility, and
+  // applies bot-appropriate range / grid count / spacing / mode. The
+  // toast carries the plain-English rationale so the user *learns*
+  // the rule of thumb instead of just trusting a black box.
+  const [autoConfigBusy, setAutoConfigBusy] = useState(false);
+  const handleAutoConfigure = useCallback(async () => {
+    if (isLocked) {
+      toast.error('Stop the bot before auto-configuring');
+      return;
+    }
+    setAutoConfigBusy(true);
+    try {
+      const market: 'spot' | 'perps' = state.isSpot ? 'spot' : 'perps';
+      const ctx = await buildContext(state.symbol, market);
+      const { preset, rationale } = recommendGridBot(ctx);
+      state.setField('lowerPrice',    String(preset.lowerPrice));
+      state.setField('upperPrice',    String(preset.upperPrice));
+      state.setField('gridCount',     String(preset.gridCount));
+      state.setField('amountPerGrid', String(preset.amountPerGrid));
+      state.setField('spacing',       preset.spacing as 'ARITHMETIC' | 'GEOMETRIC');
+      state.setField('mode',          preset.mode as 'NEUTRAL' | 'LONG' | 'SHORT');
+      toast.success(rationale, { duration: 7_000 });
+    } catch (err) {
+      toast.error(`Auto-configure failed: ${getErrorMessage(err)}`);
+    } finally {
+      setAutoConfigBusy(false);
+    }
+  }, [isLocked, state]);
+
   // ── Live computed previews — drive the right-hand "Estimated metrics"
   //    panel without re-running on every keystroke (memoised on inputs). ──
   const lower = parseFloat(state.lowerPrice) || 0;
@@ -622,6 +654,43 @@ export const GridBot: React.FC = () => {
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-5">
+          {/* ── AI Auto-Configure ── one-click smart defaults from
+               current market context. Hidden while the bot is running
+               since changing parameters mid-run would be unsafe. */}
+          {!isLocked && (
+            <button
+              type="button"
+              onClick={() => void handleAutoConfigure()}
+              disabled={autoConfigBusy}
+              className={cn(
+                'group relative flex items-center justify-between gap-3 px-4 py-3 rounded-xl',
+                'bg-gradient-to-r from-fuchsia-500/15 via-violet-500/12 to-cyan-500/15',
+                'border border-fuchsia-400/30 hover:border-fuchsia-400/50',
+                'shadow-[0_0_12px_rgba(217,70,239,0.15)] hover:shadow-[0_0_18px_rgba(217,70,239,0.3)]',
+                'transition-all duration-200',
+                autoConfigBusy && 'opacity-60 cursor-wait',
+              )}
+            >
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-fuchsia-500/30 to-cyan-400/30 border border-fuchsia-400/40 flex items-center justify-center">
+                  <Sparkles size={13} className="text-fuchsia-200" />
+                </div>
+                <div className="text-left">
+                  <div className="text-[11px] font-bold uppercase tracking-wider bg-gradient-to-r from-fuchsia-300 to-cyan-300 bg-clip-text text-transparent">
+                    AI Auto-Configure
+                  </div>
+                  <div className="text-[10px] text-text-muted mt-0.5">
+                    Smart defaults from current market
+                  </div>
+                </div>
+              </div>
+              {autoConfigBusy ? (
+                <div className="w-3 h-3 border-2 border-fuchsia-400/60 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <span className="text-[10px] text-fuchsia-300 font-mono group-hover:translate-x-0.5 transition-transform">→</span>
+              )}
+            </button>
+          )}
           {/* ── Market ── */}
           <Section icon={<Layers size={12} />} label="Market">
             <Input

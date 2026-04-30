@@ -240,7 +240,7 @@ export const Dashboard: React.FC = () => {
                   AI Strategy Setup
                 </div>
                 <div className="text-xs text-text-muted mt-0.5">
-                  Bugün için önerilen bot
+                  Today’s recommended bot
                 </div>
               </div>
             </div>
@@ -248,19 +248,19 @@ export const Dashboard: React.FC = () => {
             {/* Regime + bot pick */}
             <div className="flex-1 flex items-center gap-4 flex-wrap">
               <div className="flex flex-col items-start min-w-[120px]">
-                <span className="text-[9px] text-text-muted uppercase tracking-widest">Rejim</span>
+                <span className="text-[9px] text-text-muted uppercase tracking-widest">Regime</span>
                 <span className="text-sm font-bold text-text-primary mt-0.5">
                   {regimeLabel(recommendation.regime)}
                 </span>
               </div>
               <div className="flex flex-col items-start min-w-[140px]">
-                <span className="text-[9px] text-text-muted uppercase tracking-widest">Önerilen bot</span>
+                <span className="text-[9px] text-text-muted uppercase tracking-widest">Best fit</span>
                 <span className="text-sm font-bold text-fuchsia-300 mt-0.5">
                   {botLabel(recommendation.rec.bot)}
                 </span>
               </div>
               <div className="flex flex-col items-start min-w-[80px]">
-                <span className="text-[9px] text-text-muted uppercase tracking-widest">Güven</span>
+                <span className="text-[9px] text-text-muted uppercase tracking-widest">Confidence</span>
                 <span className="text-sm font-bold font-mono text-cyan-300 mt-0.5">
                   {recommendation.rec.confidence}%
                 </span>
@@ -292,7 +292,7 @@ export const Dashboard: React.FC = () => {
               a different style */}
           {recommendation.rec.alternative && (
             <div className="mt-2 text-[11px] text-text-muted flex items-start gap-2">
-              <span className="text-amber-400/70 shrink-0">↳ Alternatif:</span>
+              <span className="text-amber-400/70 shrink-0">↳ Alternative:</span>
               <span>
                 <strong className="text-text-secondary">{botLabel(recommendation.rec.alternative.bot)}</strong>
                 {' — '}

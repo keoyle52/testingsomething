@@ -104,11 +104,11 @@ RESPONSE FORMAT — always return strict JSON, no markdown, no prose around it:
 
 RULES:
 1. ALWAYS call read tools (get_market_overview, get_account_status, get_predictor_state, get_news) BEFORE answering questions about state. Do not guess.
-2. Destructive tools (place_market_order, close_position) require explicit user agreement (e.g. "yes", "go", "evet", "aç"). If the user is just asking, return text.
+2. Destructive tools (place_market_order, close_position) require explicit user agreement (e.g. "yes", "go", "do it"). If the user is just asking, return text.
 3. Position sizing: default to 50 USDT at 3-5x leverage unless the user specifies otherwise. Never exceed 25x — SoDEX's BTC cap.
 4. Refuse to act on hunches without data. If the user asks "should I long?" — first call get_market_overview, then answer.
 5. Be concise. 1-3 sentences for most replies. Use bullet points only when comparing 3+ items.
-6. Speak in the user's language. If the user writes Turkish, respond in Turkish; English in English.
+6. Always respond in English.
 7. NEVER fabricate prices, balances, or news headlines. If a tool fails, say so plainly.`;
 }
 
@@ -163,17 +163,17 @@ function demoIntent(userText: string, lastTool?: string): TurnResult {
   const t = userText.toLowerCase().trim();
 
   // Confirmation words — used to follow up on a pending destructive tool.
-  if (/^(yes|y|go|ok|tamam|evet|aç|onayl[ıi]yorum|do it)\b/.test(t) && lastTool) {
+  if (/^(yes|y|go|ok|confirm|do it|sure)\b/.test(t) && lastTool) {
     // The Console UI handles the actual execution; here we just push
     // the LLM-level acknowledgement so the chat reads naturally.
-    return { kind: 'text', text: 'Tamam, işlemi başlatıyorum…' };
+    return { kind: 'text', text: 'On it — placing the order now…' };
   }
-  if (/^(no|n|hay[ıi]r|iptal|durdur|stop|cancel)/.test(t)) {
-    return { kind: 'text', text: 'Tamam, iptal ettim. Başka bir konuda yardım edebilir miyim?' };
+  if (/^(no|n|cancel|stop|abort|nope)/.test(t)) {
+    return { kind: 'text', text: 'Cancelled. Anything else I can help with?' };
   }
 
   // Market overview triggers
-  if (/(btc|bitcoin|piyasa|market|fiyat|price|nas[ıi]l|how)/i.test(t) && /(durum|state|overview|nas[ıi]l|how|status)/i.test(t)) {
+  if (/(btc|bitcoin|market|price)/i.test(t) && /(state|overview|how|status|doing|look)/i.test(t)) {
     return {
       kind: 'tool',
       tool: 'get_market_overview',
@@ -183,7 +183,7 @@ function demoIntent(userText: string, lastTool?: string): TurnResult {
   }
 
   // Account / balance queries
-  if (/(balance|bakiye|hesap|account|pozisyon|position|açık|open)/i.test(t)) {
+  if (/(balance|account|position|open|wallet|holdings)/i.test(t)) {
     return {
       kind: 'tool',
       tool: 'get_account_status',
@@ -213,9 +213,9 @@ function demoIntent(userText: string, lastTool?: string): TurnResult {
   }
 
   // Trade intent — long/short
-  const longMatch  = /\b(long|al|buy|açıl[ıi]r|al[ıi]r m[ıi]y[ıi]m)\b/i.test(t);
-  const shortMatch = /\b(short|sat|sell|açıl[ıi]r|sat[ıi]r m[ıi]y[ıi]m)\b/i.test(t);
-  const askingMode = /\b(m[ıi]|mu|mü|m[ıi]y[ıi]m|should|recommend|öner|tavsiye)\b/i.test(t);
+  const longMatch  = /\b(long|buy|bullish)\b/i.test(t);
+  const shortMatch = /\b(short|sell|bearish)\b/i.test(t);
+  const askingMode = /\b(should|recommend|advice|worth|good idea|right now)\b/i.test(t);
   if ((longMatch || shortMatch) && askingMode) {
     // User is asking advice — load market overview first
     return {
@@ -225,25 +225,25 @@ function demoIntent(userText: string, lastTool?: string): TurnResult {
       reasoning: 'User wants trade advice — fetching market state to inform recommendation.',
     };
   }
-  if ((longMatch || shortMatch) && /\b(do|aç|open|act|şimdi|now)\b/i.test(t)) {
+  if ((longMatch || shortMatch) && /\b(open|do|now|place|enter)\b/i.test(t)) {
     return {
       kind: 'text',
-      text: 'Pozisyon açmadan önce miktar ve kaldıraç doğrulaması istiyorum. Örnek: "100 USDT long aç 5x kaldıraçla" şeklinde net bir komut verir misin?',
+      text: 'Before I open a position I need explicit size + leverage. Try something like: "open 100 USDT long at 5x".',
     };
   }
 
   // Help / capabilities
-  if (/(help|yard[ıi]m|nas[ıi]l kullan[ıi]l[ıi]r|what can|ne yap)/i.test(t)) {
+  if (/(help|what can|capabilities|commands)/i.test(t)) {
     return {
       kind: 'text',
-      text: 'Yapabildiklerim:\n• "BTC durumu nasıl?" — canlı piyasa özeti\n• "Hesabım?" — bakiye + açık pozisyonlar\n• "Predictor durumu?" — son AI verdict + cycle stats\n• "Son haberler" — SoSoValue başlıkları\n• "Long açayım mı?" — analiz + tavsiye\n• "100 USDT long aç 5x" — emir aç (onayla doğrularız)',
+      text: 'What I can do:\n• "How is BTC?" — live market overview\n• "What\'s in my account?" — balance + open positions\n• "Predictor status?" — last AI verdict + cycle stats\n• "Latest news" — SoSoValue headlines\n• "Should I go long?" — analysis + advice\n• "Open 100 USDT long at 5x" — place an order (with confirmation)',
     };
   }
 
   // Default: nudge them toward a tool
   return {
     kind: 'text',
-    text: 'Tam olarak ne istediğinden emin değilim. "BTC nasıl?", "hesabım?" veya "yardım" yazarak başlayabilirsin.',
+    text: 'Not sure what you mean. Try "how is BTC?", "my account", or type "help" for the full list.',
   };
 }
 

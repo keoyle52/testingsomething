@@ -14,6 +14,8 @@ import { Button } from '../components/common/Button';
 import { useSettingsStore } from '../store/settingsStore';
 import { placeOrder, fetchBookTickers, fetchFeeRate, normalizeSymbol } from '../api/services';
 import type { FeeRateInfo } from '../api/services';
+import { recommendTwapBot } from '../api/aiAutoConfig';
+import { AutoConfigureButton } from '../components/common/AutoConfigureButton';
 import { cn, getErrorMessage } from '../lib/utils';
 import { useBotPnlStore } from '../store/botPnlStore';
 
@@ -363,6 +365,21 @@ export const TwapBot: React.FC = () => {
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-5">
+          {/* ── AI Auto-Configure ── one-click smart defaults from current
+               market context. We only apply slices / interval / order type
+               here — total quantity is left to the user since it depends on
+               the position they're trying to execute, not the market regime. */}
+          <AutoConfigureButton
+            symbol={symbol}
+            market={isSpot ? 'spot' : 'perps'}
+            recommender={recommendTwapBot}
+            hidden={isRunning}
+            onApply={(preset) => {
+              if (preset.slices)      setSlices(String(preset.slices));
+              if (preset.intervalSec) setIntervalSec(String(preset.intervalSec));
+              if (preset.orderType === 'limit') setOrderType('LIMIT');
+            }}
+          />
           {/* ── Market & direction ── */}
           <Section icon={<Hash size={12} />} label="Market & direction">
             <Input label="Symbol" type="text" value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="BTC-USD" disabled={isRunning} />

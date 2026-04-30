@@ -13,6 +13,8 @@ import { Input, Select } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { useSettingsStore } from '../store/settingsStore';
 import { placeOrder, fetchBookTickers, normalizeSymbol } from '../api/services';
+import { recommendDcaBot } from '../api/aiAutoConfig';
+import { AutoConfigureButton } from '../components/common/AutoConfigureButton';
 import { cn, getErrorMessage } from '../lib/utils';
 import { useBotPnlStore } from '../store/botPnlStore';
 
@@ -350,6 +352,36 @@ export const DcaBot: React.FC = () => {
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-5">
+          {/* ── AI Auto-Configure ── one-click smart defaults from current
+               market context. The DCA store keeps fields as separate
+               useState hooks (no setField API), so onApply maps the
+               generic preset onto the right setters here. */}
+          <AutoConfigureButton
+            symbol={symbol}
+            market={isSpot ? 'spot' : 'perps'}
+            recommender={recommendDcaBot}
+            hidden={isRunning}
+            onApply={(preset) => {
+              if (preset.intervalMin) setIntervalSec(String(parseInt(String(preset.intervalMin)) * 60));
+              if (preset.maxOrders)   setMaxOrders(String(preset.maxOrders));
+              if (preset.amountPerOrder) {
+                // Convert USDT-notional → base-asset amount when we
+                // have a price snapshot. Fall back to leaving the
+                // user's current amountPerOrder untouched if not.
+                const px = currentPrice > 0 ? currentPrice : 0;
+                if (px > 0) {
+                  const baseAmt = parseFloat(String(preset.amountPerOrder)) / px;
+                  setAmountPerOrder(baseAmt.toFixed(6));
+                }
+              }
+              if (preset.mode === 'buy-the-dip') {
+                setCondition('BUY_THE_DIP');
+                if (preset.dipPct) setDipPercent(String(preset.dipPct));
+              } else if (preset.mode === 'fixed') {
+                setCondition('NONE');
+              }
+            }}
+          />
           {/* ── Market & direction ── */}
           <Section icon={<Hash size={12} />} label="Market & direction">
             <Input label="Symbol" type="text" value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="BTC-USD" disabled={isRunning} />

@@ -136,7 +136,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         regime,
         confidence: 75,
         rationale:
-          'Sakin yatay piyasa — grid bot range içinde IV hasadı yapar. Geometrik aralık ile fiyat seviyelerine göre eşit kâr/seviye verir.',
+          'Calm sideways market — a Grid Bot harvests IV inside the range. Geometric spacing keeps profit-per-grid constant across price levels.',
         presets: {
           mode: 'geometric',
           lower,
@@ -146,7 +146,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         },
         alternative: {
           bot: 'predictor',
-          reason: 'Score-margin gate yatay piyasada çoğu cycle\'ı NEUTRAL yapar; grid daha üretken.',
+          reason: 'The score-margin gate forces most cycles to NEUTRAL in sideways markets; the grid is more productive.',
         },
       };
     }
@@ -157,7 +157,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         regime,
         confidence: 70,
         rationale:
-          'Net yükseliş trendi — Buy-the-Dip modlu DCA dipleri yakalayıp ortalamayı düşük tutar. Predictor da uyumlu sinyaller veriyorsa onu da açabilirsin.',
+          'Clean uptrend — a Buy-the-Dip DCA captures pullbacks and keeps the average entry low. If the Predictor agrees, you can run it alongside.',
         presets: {
           mode: 'buy-the-dip',
           intervalMin: 30,
@@ -168,8 +168,8 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         alternative: {
           bot: 'predictor',
           reason: inp.aiConfidence && inp.aiConfidence >= 70
-            ? `AI Strategist ${inp.aiConfidence}% güvenle uyumlu — Predictor auto-trade ile tetik bekleyebilirsin.`
-            : 'Predictor son cycle\'lar düşük güvenli — DCA daha güvenli.',
+            ? `AI Strategist agrees at ${inp.aiConfidence}% confidence — you can let Predictor auto-trade fire on the next signal.`
+            : 'Recent Predictor cycles have low conviction — DCA is the safer pick.',
         },
       };
     }
@@ -180,7 +180,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         regime,
         confidence: 65,
         rationale:
-          'Net aşağı trend — Predictor SHORT yönüne kayar, ATR-SL ile tail-risk sınırlı. DCA short modu da düşünülebilir ama momentumda kalmak için Predictor daha hızlı tepki verir.',
+          'Clean downtrend — the Predictor will lean SHORT and the ATR-scaled stop bounds tail risk. A short-mode DCA is an option, but the Predictor reacts faster to maintain momentum.',
         presets: {
           autoTrade: 'on',
           tradeAmountUsdt: '50',
@@ -189,7 +189,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         },
         alternative: {
           bot: 'twap',
-          reason: 'Mevcut bir long\'u dilimleyerek kapatmak gerekirse TWAP volatilite guard ile market-impact azaltır.',
+          reason: 'If you need to slice out of an existing long, TWAP\'s volatility guard reduces market impact on exit.',
         },
       };
     }
@@ -200,7 +200,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         regime,
         confidence: 60,
         rationale:
-          'Volatil dalgalı piyasa — büyük emir tek seferde girilirse kötü ortalama getirir. TWAP zaman/boyut varyansı + price-band guard ile ortalama fiyat yakalar.',
+          'Choppy volatile market — a single large order fills at a poor average. TWAP\'s time/size jitter + price-band guard captures a fair average price.',
         presets: {
           orderType: 'limit',
           slices: 12,
@@ -210,7 +210,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         },
         alternative: {
           bot: 'grid',
-          reason: 'Eğer range tahmin edilebilirse geniş geometric grid (±5%) hasadı artırır.',
+          reason: 'If the range is forecastable, a wide geometric grid (±5%) increases harvest.',
         },
       };
     }
@@ -221,7 +221,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         regime,
         confidence: 70,
         rationale:
-          'Yoğun haber akışı — News Bot Gemini AI sentiment ile haber-anı scalp yapar. TP/SL/hold-time guard\'lar aşırı tutmayı engeller.',
+          'Heavy news flow — the News Bot scalps headline reactions with Gemini AI sentiment. TP/SL/hold-time guards prevent over-holding.',
         presets: {
           mode: 'ai',
           marginUsdt: 20,
@@ -232,7 +232,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         },
         alternative: {
           bot: 'predictor',
-          reason: 'News + Predictor birlikte: Predictor\'ı düşük leverage ile aç, NewsBot agresif scalp yapsın.',
+          reason: 'Pair them: run Predictor on low leverage and let News Bot scalp aggressively on headlines.',
         },
       };
     }
@@ -247,7 +247,7 @@ export function recommendBot(inp: RegimeInputs, price: number): BotRecommendatio
         regime: 'mixed',
         confidence: 45,
         rationale:
-          'Net bir rejim yok — Predictor\'ın score-margin gate\'i kötü kurulumlarda zaten NEUTRAL döner. AI Console\'dan "BTC nasıl?" diye sorup detay alabilirsin.',
+          'No clean regime detected — the Predictor\'s score-margin gate already turns NEUTRAL on weak setups. Ask the AI Console for a deeper read if you want detail.',
         presets: {
           autoTrade: 'on',
           tradeAmountUsdt: '50',
@@ -285,12 +285,12 @@ export function recommendationLink(rec: BotRecommendation): string {
 /** Friendly label for UI badges. */
 export function regimeLabel(r: Regime): string {
   switch (r) {
-    case 'low_vol_range':    return 'Sakin Yatay';
-    case 'strong_uptrend':   return 'Güçlü Yükseliş';
-    case 'strong_downtrend': return 'Güçlü Düşüş';
-    case 'choppy_volatile':  return 'Volatil Dalgalı';
-    case 'news_driven':      return 'Haber Yoğun';
-    case 'mixed':            return 'Karışık';
+    case 'low_vol_range':    return 'Calm Range';
+    case 'strong_uptrend':   return 'Strong Uptrend';
+    case 'strong_downtrend': return 'Strong Downtrend';
+    case 'choppy_volatile':  return 'Choppy Volatile';
+    case 'news_driven':      return 'News Driven';
+    case 'mixed':            return 'Mixed';
   }
 }
 

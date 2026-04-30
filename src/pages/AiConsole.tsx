@@ -62,11 +62,11 @@ const MAX_HISTORY_PERSIST = 50;   // localStorage entries — older trims off
 // to onboard the user to what the assistant can do without making them
 // read documentation.
 const SUGGESTED_PROMPTS: string[] = [
-  'BTC durumu nasıl?',
-  'Hesabımı göster',
-  'Predictor son ne dedi?',
-  'Son haberler',
-  'Long açayım mı?',
+  'How is BTC?',
+  'Show my account',
+  'What did the Predictor say?',
+  'Latest news',
+  'Should I go long?',
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -386,7 +386,7 @@ export const AiConsole: React.FC = () => {
       // they're approving.
       appendMessage({
         role: 'assistant',
-        content: `Önerilen: \`${result.tool}\`\n\n${result.reasoning || '(no rationale provided)'}\n\nArgs: \`\`\`json\n${JSON.stringify(result.args, null, 2)}\n\`\`\``,
+        content: `Proposed: \`${result.tool}\`\n\n${result.reasoning || '(no rationale provided)'}\n\nArgs: \`\`\`json\n${JSON.stringify(result.args, null, 2)}\n\`\`\``,
         ts: nowMs(),
       });
       setBusy(false);
@@ -617,7 +617,7 @@ export const AiConsole: React.FC = () => {
               ? 'Confirm or cancel the action above first…'
               : busy
                 ? 'Thinking…'
-                : 'Ask anything: "BTC nasıl?", "100 USDT long aç 5x", "hesabım?"'}
+                : 'Ask anything: "How is BTC?", "open 100 USDT long at 5x", "my account?"'}
             disabled={busy || !!pendingTool}
             className={cn(
               'flex-1 px-4 py-2.5 rounded-xl bg-surface border border-border text-sm',

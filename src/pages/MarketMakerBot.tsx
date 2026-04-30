@@ -21,6 +21,8 @@ import {
 import { useBotStore } from '../store/botStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { useBotPnlStore } from '../store/botPnlStore';
+import { recommendMarketMakerBot } from '../api/aiAutoConfig';
+import { AutoConfigureButton } from '../components/common/AutoConfigureButton';
 
 /**
  * ┌─────────────────────────────────────────────────────────────────────┐
@@ -482,11 +484,11 @@ export const MarketMakerBot: React.FC = () => {
         <Zap size={14} className="shrink-0 mt-0.5 text-emerald-400" />
         <div>
           <strong className="text-emerald-300">How it works:</strong>{' '}
-          Bot, BBO&apos;nun iç tarafına post-only (GTX) limit emirler yerleştirir.
-          Her dolum <strong>maker fee</strong> öder — taker fee kadar yarı.
-          Fiyat hareket ettikçe yeni emirler basar, eskimişleri iptal eder.
-          Hedef: <em>en yüksek hacim, en düşük fee</em>. Bütçe / volume / fee
-          limitlerine ulaşınca otomatik durur.
+          The bot posts <strong>post-only (GTX)</strong> limit orders just
+          inside the BBO. Every fill is a guaranteed <strong>maker fill</strong>
+          — typically half the taker fee. As the market moves, it requotes
+          stale orders and replaces filled ones. Goal: <em>maximum volume,
+          minimum fee</em>. Auto-stops on budget / volume / fee caps.
         </div>
       </div>
 
@@ -522,6 +524,23 @@ export const MarketMakerBot: React.FC = () => {
       <div className="grid lg:grid-cols-[400px_1fr] gap-5 flex-1 min-h-0">
         {/* ── Left: configuration panel ─────────────────────────── */}
         <div className="flex flex-col gap-4 overflow-y-auto pr-1">
+          {/* AI Auto-Configure — derives layers / spread / re-quote / order
+              size from the current order book + 24h ATR. Hidden while the
+              bot is running so a click can't accidentally desync live state
+              from configured state. */}
+          <AutoConfigureButton
+            symbol={mm.symbol}
+            market="spot"
+            recommender={(ctx) => recommendMarketMakerBot(ctx, parseFloat(mm.budgetUsdt) || 100)}
+            hidden={isRunning}
+            onApply={(preset) => {
+              if (preset.layers)        setField('layers',        String(preset.layers));
+              if (preset.spreadBps)     setField('spreadBps',     String(preset.spreadBps));
+              if (preset.requoteBps)    setField('requoteBps',    String(preset.requoteBps));
+              if (preset.orderSizeUsdt) setField('orderSizeUsdt', String(preset.orderSizeUsdt));
+              if (preset.makerFeeRate)  setField('makerFeeRate',  String(preset.makerFeeRate));
+            }}
+          />
           <Card className="p-4 space-y-3">
             <div className="text-[10px] uppercase tracking-widest font-bold text-text-muted">
               Pair &amp; Sizing
@@ -612,7 +631,7 @@ export const MarketMakerBot: React.FC = () => {
               value={mm.spreadBps}
               onChange={(e) => setField('spreadBps', e.target.value)}
               disabled={isRunning}
-              hint="0 = BBO'ya katıl (en hızlı dolum). Daha yüksek = daha az adverse selection ama daha yavaş dolum."
+              hint="0 = join the BBO (fastest fills). Higher = less adverse selection but slower fills."
             />
             <Input
               label="Re-quote Threshold (bps)"
@@ -622,7 +641,7 @@ export const MarketMakerBot: React.FC = () => {
               value={mm.requoteBps}
               onChange={(e) => setField('requoteBps', e.target.value)}
               disabled={isRunning}
-              hint="Fiyat bu kadar bps uzaklaşınca emir iptal edip yeniden basılır."
+              hint="When the BBO moves this many bps from a posted order, cancel and re-quote at the fresh price."
             />
             <Input
               label="Maker Fee Rate"
@@ -632,7 +651,7 @@ export const MarketMakerBot: React.FC = () => {
               value={mm.makerFeeRate}
               onChange={(e) => setField('makerFeeRate', e.target.value)}
               disabled={isRunning}
-              hint="0.0001 = 1bp. SOSO stake indirimi varsa düşür."
+              hint="0.0001 = 1bp. Lower this if you have a SOSO stake fee discount."
             />
           </Card>
 
@@ -697,24 +716,24 @@ export const MarketMakerBot: React.FC = () => {
           {/* Estimated impact preview — answers "what will this DO?" */}
           <Card className="p-4 space-y-2 bg-emerald-500/5 border-emerald-500/20">
             <div className="text-[10px] uppercase tracking-widest font-bold text-emerald-300">
-              Tahmini Etki
+              Estimated Impact
             </div>
             <div className="text-[11px] text-text-secondary space-y-1">
               <div className="flex justify-between">
-                <span>Saatte hacim (kaba):</span>
+                <span>Volume per hour (rough):</span>
                 <strong className="font-mono text-text-primary">~${estVolumePerHour.toFixed(0)}</strong>
               </div>
               <div className="flex justify-between">
-                <span>Saatte fee (est):</span>
+                <span>Fee per hour (est):</span>
                 <strong className="font-mono text-text-primary">~${(estVolumePerHour * feeRate).toFixed(2)}</strong>
               </div>
               <div className="flex justify-between">
-                <span>Fee oranı:</span>
+                <span>Fee rate:</span>
                 <strong className="font-mono text-text-primary">{feeRatioPct.toFixed(3)}%</strong>
               </div>
             </div>
             <p className="text-[10px] text-text-muted italic mt-2">
-              Tahminler ortalama tutuk pazar koşullarına göre. Volatil pazarda fill hızı artar, sakin pazarda azalır.
+              Estimates assume average market conditions. Volatile markets fill faster, quiet markets slower.
             </p>
           </Card>
 
@@ -804,7 +823,7 @@ export const MarketMakerBot: React.FC = () => {
             {!isRunning && (
               <div className="mt-3 flex items-start gap-2 text-[11px] text-text-muted bg-surface rounded-lg p-2">
                 <AlertCircle size={12} className="shrink-0 mt-0.5" />
-                Bot durduruldu. Start&apos;a basınca yeni bir oturum başlatır.
+                Bot is stopped. Press Start to begin a new farming session.
               </div>
             )}
           </Card>
@@ -820,7 +839,7 @@ export const MarketMakerBot: React.FC = () => {
             <div className="flex-1 overflow-y-auto space-y-1 font-mono text-[11px]">
               {logs.length === 0 ? (
                 <div className="text-text-muted italic text-center py-6">
-                  Henüz aktivite yok. Start&apos;a basınca emirler dolmaya başlar.
+                  No activity yet. Press Start and orders will begin filling.
                 </div>
               ) : (
                 logs.map((l, i) => {
