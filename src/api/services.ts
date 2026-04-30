@@ -757,6 +757,35 @@ export async function fetchBookTickers(market: 'spot' | 'perps' = 'perps') {
   }));
 }
 
+/**
+ * Coerce a single orderbook level into the canonical `[priceStr, qtyStr]`
+ * tuple consumers expect. SoDEX's response shape is occasionally
+ * inconsistent between venues — the level may arrive as:
+ *   - `[price, qty]`               (array form, perps)
+ *   - `[price, qty, ...]`          (array form with extra metadata)
+ *   - `{ px, sz }`                 (object form, observed on spot)
+ *   - `{ price, quantity }`        (older docs spelling)
+ *   - `{ p, q }`                   (websocket diff style)
+ * Returning `[null, null]` signals an unparseable row so callers can
+ * skip it instead of silently treating `0` as a valid price.
+ */
+function normalizeOrderbookLevel(raw: unknown): [string, string] | [null, null] {
+  if (Array.isArray(raw)) {
+    const price = raw[0];
+    const qty = raw[1];
+    if (price == null || qty == null) return [null, null];
+    return [String(price), String(qty)];
+  }
+  if (raw && typeof raw === 'object') {
+    const r = raw as Record<string, unknown>;
+    const price = r.px ?? r.price ?? r.p ?? r.bidPx ?? r.askPx;
+    const qty   = r.sz ?? r.quantity ?? r.qty ?? r.q ?? r.bidSz ?? r.askSz;
+    if (price == null || qty == null) return [null, null];
+    return [String(price), String(qty)];
+  }
+  return [null, null];
+}
+
 export async function fetchOrderbook(symbol: string, market: 'spot' | 'perps' = 'perps', limit = 20) {
   if (isDemo()) return getDemoOrderbook(symbol, market, limit);
   const sym = normalizeSymbol(symbol, market);
@@ -767,7 +796,20 @@ export async function fetchOrderbook(symbol: string, market: 'spot' | 'perps' = 
   }
   const client = getClient(market);
   const res = await withRetry(() => client.get(`/markets/${sym}/orderbook`, { params: { limit } }));
-  const data = res?.data ?? res ?? { bids: [], asks: [] };
+  const raw = res?.data ?? res ?? {};
+  // Some SoDEX endpoints wrap the snapshot under a top-level data /
+  // payload key; flatten so consumers always see `{bids, asks}` at root.
+  const inner = (raw && typeof raw === 'object' && (raw as Record<string, unknown>).bids === undefined
+    ? ((raw as Record<string, unknown>).data ?? raw)
+    : raw) as Record<string, unknown>;
+  const rawBids = Array.isArray(inner?.bids) ? inner.bids as unknown[] : [];
+  const rawAsks = Array.isArray(inner?.asks) ? inner.asks as unknown[] : [];
+  // Normalise every level to the canonical [price, qty] tuple form so
+  // downstream consumers (BtcPredictor, MarketMakerBot, AutoConfigure)
+  // can read them uniformly without per-callsite shape-sniffing.
+  const bids = rawBids.map(normalizeOrderbookLevel).filter(([p]) => p != null) as [string, string][];
+  const asks = rawAsks.map(normalizeOrderbookLevel).filter(([p]) => p != null) as [string, string][];
+  const data = { ...(inner as Record<string, unknown>), bids, asks };
   _orderbookCache.set(cacheKey, { data, ts: Date.now() });
   return data;
 }

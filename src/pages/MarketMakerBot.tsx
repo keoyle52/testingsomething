@@ -14,6 +14,7 @@ import {
   fetchOrderbook,
   fetchOpenOrders,
   fetchSymbolTradingRules,
+  fetchBookTickers,
   placeOrder,
   batchCancelOrders,
 } from '../api/services';
@@ -226,11 +227,35 @@ export const MarketMakerBot: React.FC = () => {
     setBusy(true);
     try {
       // 1. Order book snapshot — drives target prices.
-      const ob = await fetchOrderbook(mm.symbol, 'spot', 5) as { bids?: unknown[][]; asks?: unknown[][] };
-      const topBid = parseFloat(String(ob?.bids?.[0]?.[0] ?? 0));
-      const topAsk = parseFloat(String(ob?.asks?.[0]?.[0] ?? 0));
+      // fetchOrderbook now normalises every venue's row shape to
+      // [priceStr, qtyStr] so we can read the top-of-book directly.
+      const ob = await fetchOrderbook(mm.symbol, 'spot', 5) as {
+        bids?: [string, string][]; asks?: [string, string][];
+      };
+      let topBid = parseFloat(String(ob?.bids?.[0]?.[0] ?? 0));
+      let topAsk = parseFloat(String(ob?.asks?.[0]?.[0] ?? 0));
+      // Fallback for venues / tokens where the orderbook endpoint is
+      // empty even though the pair trades — use the bookTickers feed
+      // (top-of-book ticker) which usually has BBO when orderbook is
+      // sparse on testnet.
       if (!Number.isFinite(topBid) || !Number.isFinite(topAsk) || topBid <= 0 || topAsk <= topBid) {
-        pushLog('error', 'Order book unavailable — skipping cycle');
+        try {
+          const bts = await fetchBookTickers('spot') as Array<Record<string, unknown>>;
+          const row = bts.find((t) => String(t.symbol) === mm.symbol);
+          const fbBid = parseFloat(String(row?.bidPrice ?? row?.bid ?? row?.bidPx ?? 0));
+          const fbAsk = parseFloat(String(row?.askPrice ?? row?.ask ?? row?.askPx ?? 0));
+          if (Number.isFinite(fbBid) && Number.isFinite(fbAsk) && fbBid > 0 && fbAsk > fbBid) {
+            topBid = fbBid;
+            topAsk = fbAsk;
+            pushLog('info', `Orderbook empty — using bookTicker BBO ${fbBid.toFixed(2)}/${fbAsk.toFixed(2)}`);
+          }
+        } catch { /* fall through to error log below */ }
+      }
+      if (!Number.isFinite(topBid) || !Number.isFinite(topAsk) || topBid <= 0 || topAsk <= topBid) {
+        pushLog('error',
+          `Order book unavailable for ${mm.symbol} — skipping cycle. ` +
+          `(bids=${ob?.bids?.length ?? 0}, asks=${ob?.asks?.length ?? 0})`,
+        );
         return;
       }
       setBestBid(topBid);
