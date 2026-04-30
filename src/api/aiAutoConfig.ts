@@ -80,25 +80,65 @@ export interface RecommendationResult<P extends Preset = Preset> {
 // ─── Context builder ──────────────────────────────────────────────────────────
 
 /**
+ * Fetch klines from `market`, then transparently retry on the other
+ * market if the response is empty. Common case: SoDEX testnet spot
+ * has no kline history for `BTC_USDC`, but the BTC-USD perp does.
+ *
+ * `fetchKlines` already normalises the symbol to the right venue
+ * format internally (BTC_USDC ↔ BTC-USD), so passing the same string
+ * to either market just works.
+ */
+async function fetchKlinesWithFallback(symbol: string, market: 'spot' | 'perps'): Promise<Array<Record<string, unknown>>> {
+  // Primary attempt — the venue the user actually picked.
+  try {
+    const primary = await fetchKlines(symbol, '1h', 24, market) as Array<Record<string, unknown>>;
+    if (Array.isArray(primary) && primary.length >= 5) return primary;
+  } catch {
+    // ignore — fall through to the alternate market
+  }
+
+  // Cross-venue fallback. We pass the same input symbol and let
+  // fetchKlines apply its own normalisation; this keeps the retry
+  // simple even for unusual quote-asset spellings.
+  const alt: 'spot' | 'perps' = market === 'spot' ? 'perps' : 'spot';
+  try {
+    const fallback = await fetchKlines(symbol, '1h', 24, alt) as Array<Record<string, unknown>>;
+    if (Array.isArray(fallback) && fallback.length >= 5) return fallback;
+  } catch {
+    // ignore — caller decides how to surface the empty result
+  }
+
+  return [];
+}
+
+/**
  * Fetch a complete market context in a single round-trip pair.
  *
  * Uses 24× 1h candles for ATR + 24h range, and the L1 order book for
  * tight bid/ask. Both endpoints are already cached server-side so
  * repeated Auto-Configure presses don't hammer the API.
  *
- * Throws if the data is malformed — callers should `try/catch` and
- * surface a toast on failure.
+ * SoDEX **spot kline coverage is patchy** — newly-listed pairs and
+ * less-traded markets often return an empty array on testnet even
+ * when the orderbook is live. Since spot and perps for the same base
+ * asset (e.g. BTC_USDC vs BTC-USD) track the same price action via
+ * arbitrage, we transparently fall back to the perps equivalent when
+ * the requested market has no candles. The orderbook itself stays
+ * sourced from the requested market so spread / BBO figures still
+ * reflect the venue the user is actually trading on.
+ *
+ * Throws if BOTH markets fail — callers should `try/catch` and
+ * surface a toast.
  */
 export async function buildContext(symbol: string, market: 'spot' | 'perps'): Promise<MarketContext> {
-  const [klinesRaw, ob] = await Promise.all([
-    fetchKlines(symbol, '1h', 24, market),
-    fetchOrderbook(symbol, market, 1),
-  ]);
-
-  const klines = (klinesRaw as Array<Record<string, unknown>>) ?? [];
+  const klines = await fetchKlinesWithFallback(symbol, market);
   if (klines.length < 5) {
-    throw new Error(`Not enough klines for ${symbol} — got ${klines.length}, need ≥5`);
+    throw new Error(
+      `Not enough klines for ${symbol} — got ${klines.length}, need ≥5. ` +
+      `Try a more liquid pair (BTC, ETH, SOL).`,
+    );
   }
+  const ob = await fetchOrderbook(symbol, market, 1);
 
   // Parse OHLC from the SoDEX-aliased fields. fetchKlines normalises
   // these to {open, high, low, close} so we can read directly.
