@@ -385,7 +385,7 @@ export const TwapBot: React.FC = () => {
             <Input
               label="Symbol"
               value={symbol}
-              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+              onChange={(e) => setSymbol(e.target.value)}
               placeholder="e.g. BTC-USDC"
               disabled={isRunning}
             />

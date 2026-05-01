@@ -551,7 +551,7 @@ export const MarketMakerBot: React.FC = () => {
             <Input
               label="Trading Pair"
               value={mm.symbol}
-              onChange={(e) => setField('symbol', e.target.value.toUpperCase())}
+              onChange={(e) => setField('symbol', e.target.value)}
               placeholder="e.g. BTC-USDC"
               disabled={isRunning}
             />

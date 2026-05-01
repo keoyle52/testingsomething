@@ -696,7 +696,7 @@ export const GridBot: React.FC = () => {
             <Input
               label="Symbol"
               value={state.symbol}
-              onChange={(e) => state.setField('symbol', e.target.value.toUpperCase())}
+              onChange={(e) => state.setField('symbol', e.target.value)}
               placeholder="e.g. BTC-USDC"
               disabled={isLocked}
             />
