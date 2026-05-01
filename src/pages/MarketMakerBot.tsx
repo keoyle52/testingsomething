@@ -100,6 +100,7 @@ export const MarketMakerBot: React.FC = () => {
   const { privateKey, isDemoMode } = useSettingsStore();
   const mm = useBotStore((s) => s.marketMakerBot);
   const setField = useBotStore((s) => s.marketMakerBot.setField);
+  const bumpField = useBotStore((s) => s.marketMakerBot.bumpField);
   const resetStats = useBotStore((s) => s.marketMakerBot.resetStats);
   const recordTrade = useBotPnlStore((s) => s.recordTrade);
 
@@ -137,6 +138,9 @@ export const MarketMakerBot: React.FC = () => {
   // into the same slot. Avoids the race where managedRef has dropped
   // an order but the exchange still has it locked against our balance.
   const lastCancelAtRef = useRef(0);
+  // Forward ref to stopBotInternal so reconcile can invoke it without
+  // a circular dependency between the two useCallbacks.
+  const stopBotInternalRef = useRef<() => Promise<void>>(async () => {});
 
   // ── Logging helper. Bounded to MAX_LOG_ENTRIES. Newest first. ─────
   const pushLog = useCallback((type: LogEntry['type'], message: string) => {
@@ -218,7 +222,7 @@ export const MarketMakerBot: React.FC = () => {
         postedAt: nowMs(),
       };
       managedRef.current.set(cloid, order);
-      setField('ordersPlaced', mm.ordersPlaced + 1);
+      bumpField('ordersPlaced', 1);
       pushLog('order', `${side === 'BUY' ? '↗' : '↘'} ${side} ${qtyBase.toFixed(qtyPrec)} @ ${price.toFixed(pricePrec)} (${cloid.slice(-8)})`);
       return order;
     } catch (err) {
@@ -233,7 +237,7 @@ export const MarketMakerBot: React.FC = () => {
       }
       return null;
     }
-  }, [mm.symbol, mm.ordersPlaced, qtyPrec, pricePrec, setField, pushLog]);
+  }, [mm.symbol, qtyPrec, pricePrec, bumpField, pushLog]);
 
   // ── Reconciliation tick. Runs every RECONCILE_INTERVAL_MS while
   //    the bot is RUNNING. Pulls a snapshot of the order book + open
@@ -310,13 +314,16 @@ export const MarketMakerBot: React.FC = () => {
           // exchange; we lump everything into USDT-equivalent for the
           // UI. The fee figure is an estimate — the real number depends
           // on stake-tier discounts.
-          setField('ordersFilled', mm.ordersFilled + 1);
-          setField('volumeUsdt', mm.volumeUsdt + filledNotional);
-          setField('feesUsdt', mm.feesUsdt + fee);
+          // Use bumpField (functional update) so multiple fills in the
+          // same reconcile pass accumulate correctly instead of each
+          // call overwriting the previous with a stale-closure base.
+          bumpField('ordersFilled', 1);
+          bumpField('volumeUsdt', filledNotional);
+          bumpField('feesUsdt', fee);
           // Inventory drifts opposite to the side that just filled —
           // a BUY fill increases inventory by quantity, a SELL fill
           // reduces it.
-          setField('inventoryBase', mm.inventoryBase + (mo.side === 'BUY' ? mo.quantity : -mo.quantity));
+          bumpField('inventoryBase', mo.side === 'BUY' ? mo.quantity : -mo.quantity);
           // Aggregate the fee as a "negative PnL" on the bot strip so
           // the user can see fee burn at a glance. Real PnL would
           // include inventory revaluation but that is noisy at sub-
@@ -332,14 +339,18 @@ export const MarketMakerBot: React.FC = () => {
       managedRef.current = stillOpen;
 
       // 4. Stop conditions check — bail before placing more orders.
-      if (volTarget > 0 && mm.volumeUsdt >= volTarget) {
-        pushLog('info', `Volume target reached: $${mm.volumeUsdt.toFixed(2)} ≥ $${volTarget.toFixed(2)}. Stopping.`);
-        await stopBotInternal();
+      // Read from the store directly so we see the fresh totals after
+      // the bumpField calls in step 3 above (closure `mm` is stale by
+      // this point in the tick).
+      const postFillMm = useBotStore.getState().marketMakerBot;
+      if (volTarget > 0 && postFillMm.volumeUsdt >= volTarget) {
+        pushLog('info', `Volume target reached: $${postFillMm.volumeUsdt.toFixed(2)} ≥ $${volTarget.toFixed(2)}. Stopping.`);
+        await stopBotInternalRef.current();
         return;
       }
-      if (feeBudget > 0 && mm.feesUsdt >= feeBudget) {
-        pushLog('info', `Fee budget reached: $${mm.feesUsdt.toFixed(4)} ≥ $${feeBudget.toFixed(4)}. Stopping.`);
-        await stopBotInternal();
+      if (feeBudget > 0 && postFillMm.feesUsdt >= feeBudget) {
+        pushLog('info', `Fee budget reached: $${postFillMm.feesUsdt.toFixed(4)} ≥ $${feeBudget.toFixed(4)}. Stopping.`);
+        await stopBotInternalRef.current();
         return;
       }
 
@@ -359,7 +370,7 @@ export const MarketMakerBot: React.FC = () => {
         try {
           await batchCancelOrders(toCancel.map((c) => c.id), mm.symbol, 'spot');
           for (const { cloid } of toCancel) managedRef.current.delete(cloid);
-          setField('ordersCancelled', mm.ordersCancelled + toCancel.length);
+          bumpField('ordersCancelled', toCancel.length);
           // Stamp the cancel time so the placement block below can
           // skip this tick — exchange takes a moment to release the
           // balance lock on the cancelled orders, and re-placing into
@@ -464,7 +475,11 @@ export const MarketMakerBot: React.FC = () => {
         const qty = parseFloat(String(o.quantity ?? o.qty ?? o.sz ?? 0));
         return Number.isFinite(qty) ? acc + qty : acc;
       }, 0);
-      const availableInventory = Math.max(0, mm.inventoryBase - reservedSellQty);
+      // Read live inventory from the store directly rather than the
+      // closure — bumpField calls earlier in this same tick (fill
+      // detection) have already run, and we need their effect here.
+      const liveInventoryBase = useBotStore.getState().marketMakerBot.inventoryBase;
+      const availableInventory = Math.max(0, liveInventoryBase - reservedSellQty);
       const maxNewSellSlots = qtyPerOrder > 0
         ? Math.floor(availableInventory / qtyPerOrder)
         : 0;
@@ -497,10 +512,14 @@ export const MarketMakerBot: React.FC = () => {
     // The dependency list is intentionally narrow — the rest is read
     // through refs so the polling timer doesn't churn every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mm.symbol, mm.ordersFilled, mm.volumeUsdt, mm.feesUsdt, mm.inventoryBase,
-      mm.ordersCancelled, mm.requoteBps, mm.spreadBps,
-      tickSize, qtyPrec, pricePrec, layers, orderSize, feeRate,
-      volTarget, feeBudget, placeMakerOrder, pushLog, setField, recordTrade]);
+    // Dependencies are only the values actually read as plain (non-
+    // ref, non-store-functional) inputs. Counters that we only ever
+    // increment via bumpField are intentionally NOT in this list —
+    // including them would churn the callback identity and re-break
+    // the reconcileRef pattern below.
+  }, [mm.symbol, mm.requoteBps, mm.spreadBps,
+      tickSize, qtyPrec, pricePrec, layers, orderSize, feeRate, budget,
+      volTarget, feeBudget, placeMakerOrder, pushLog, bumpField, recordTrade]);
 
   // ── Stale-closure guard ───────────────────────────────────────────
   // `reconcile` is wrapped in useCallback with `mm.inventoryBase` (and
@@ -531,7 +550,7 @@ export const MarketMakerBot: React.FC = () => {
     if (open.length > 0) {
       try {
         await batchCancelOrders(open.map((o) => o.orderID ?? o.clOrdID), mm.symbol, 'spot');
-        setField('ordersCancelled', mm.ordersCancelled + open.length);
+        bumpField('ordersCancelled', open.length);
         pushLog('cancel', `Stopped — cancelled ${open.length} resting order(s)`);
       } catch (err) {
         pushLog('error', `Stop cancel failed: ${getErrorMessage(err)}`);
@@ -540,7 +559,12 @@ export const MarketMakerBot: React.FC = () => {
     } else {
       pushLog('info', 'Bot stopped');
     }
-  }, [mm.symbol, mm.ordersCancelled, setField, pushLog]);
+  }, [mm.symbol, setField, bumpField, pushLog]);
+
+  // Keep the forward ref aligned with the latest stopBotInternal so
+  // reconcile (declared earlier) can invoke it through the ref without
+  // a circular useCallback dependency.
+  useEffect(() => { stopBotInternalRef.current = stopBotInternal; }, [stopBotInternal]);
 
   // Manual stop wrapper for the UI button.
   const stopBot = useCallback(() => { void stopBotInternal(); }, [stopBotInternal]);

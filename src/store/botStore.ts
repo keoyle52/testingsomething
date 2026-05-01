@@ -116,6 +116,18 @@ interface MarketMakerBotState {
 
   // ── Setters ───────────────────────────────────────────────────
   setField: <K extends keyof MarketMakerBotState>(field: K, value: MarketMakerBotState[K]) => void;
+  /**
+   * Atomically add `delta` to a numeric field. This is the *only*
+   * correct way to accumulate multiple increments from within the
+   * same reconcile tick — `setField('x', mm.x + delta)` reads `mm.x`
+   * from a stale closure and silently overwrites previous calls in
+   * the same pass (e.g. three fills in one tick would only count as
+   * one because the setter sees the same base value every time).
+   */
+  bumpField: (
+    field: 'ordersPlaced' | 'ordersFilled' | 'ordersCancelled' | 'volumeUsdt' | 'feesUsdt' | 'inventoryBase',
+    delta: number,
+  ) => void;
   resetStats: () => void;
 }
 
@@ -187,6 +199,16 @@ export const useBotStore = create<BotStoreState>((set) => ({
     setField: (field, value) =>
       set((state) => ({
         marketMakerBot: { ...state.marketMakerBot, [field]: value },
+      })),
+    // Functional update — reads the *current* store value via `state`
+    // rather than a closed-over snapshot, so repeated calls in the
+    // same event loop accumulate correctly.
+    bumpField: (field, delta) =>
+      set((state) => ({
+        marketMakerBot: {
+          ...state.marketMakerBot,
+          [field]: (state.marketMakerBot[field] as number) + delta,
+        },
       })),
     resetStats: () =>
       set((state) => ({
