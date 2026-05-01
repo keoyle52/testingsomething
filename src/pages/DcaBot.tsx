@@ -15,6 +15,7 @@ import { useSettingsStore } from '../store/settingsStore';
 import { placeOrder, fetchBookTickers, normalizeSymbol } from '../api/services';
 import { recommendDcaBot } from '../api/aiAutoConfig';
 import { AutoConfigureButton } from '../components/common/AutoConfigureButton';
+import { SymbolSelector } from '../components/common/SymbolSelector';
 import { cn, getErrorMessage } from '../lib/utils';
 import { useBotPnlStore } from '../store/botPnlStore';
 
@@ -384,11 +385,10 @@ export const DcaBot: React.FC = () => {
           />
           {/* ── Market & direction ── */}
           <Section icon={<Hash size={12} />} label="Market & direction">
-            <Input
-              label="Symbol"
+            <SymbolSelector
+              market={isSpot ? 'spot' : 'perps'}
               value={symbol}
-              onChange={(e) => setSymbol(e.target.value)}
-              placeholder="e.g. BTC-USDC"
+              onChange={setSymbol}
               disabled={isRunning}
             />
             <div>

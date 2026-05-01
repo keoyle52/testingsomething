@@ -754,11 +754,17 @@ export const NewsBot: React.FC = () => {
               />
             </div>
 
-            <Input
+            <Select
               label="Fallback coin (when headline has no ticker)"
               value={fallbackCoin}
               onChange={(e) => setFallbackCoin(e.target.value.toUpperCase())}
-              placeholder="BTC"
+              disabled={isRunning}
+              options={[
+                { value: 'BTC', label: 'BTC' },
+                { value: 'ETH', label: 'ETH' },
+                { value: 'SOL', label: 'SOL' },
+                { value: 'SOSO', label: 'SOSO' },
+              ]}
             />
 
             <Select

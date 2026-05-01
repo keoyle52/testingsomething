@@ -9,6 +9,7 @@ import { Input } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { StatusBadge } from '../components/common/StatusBadge';
+import { SymbolSelector } from '../components/common/SymbolSelector';
 import { cn, getErrorMessage } from '../lib/utils';
 import {
   fetchOrderbook,
@@ -713,11 +714,10 @@ export const MarketMakerBot: React.FC = () => {
             <div className="text-[10px] uppercase tracking-widest font-bold text-text-muted">
               Pair &amp; Sizing
             </div>
-            <Input
-              label="Trading Pair"
+            <SymbolSelector
+              market="spot"
               value={mm.symbol}
-              onChange={(e) => setField('symbol', e.target.value)}
-              placeholder="e.g. BTC-USDC"
+              onChange={(val) => setField('symbol', val)}
               disabled={isRunning}
             />
             <Input

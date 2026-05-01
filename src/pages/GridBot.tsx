@@ -21,6 +21,7 @@ import { buildContext, recommendGridBot } from '../api/aiAutoConfig';
 import { cn, getErrorMessage } from '../lib/utils';
 import { NumberDisplay } from '../components/common/NumberDisplay';
 import { StatusBadge } from '../components/common/StatusBadge';
+import { SymbolSelector } from '../components/common/SymbolSelector';
 import { RiskSummaryModal, type RiskSummaryRow } from '../components/common/RiskSummaryModal';
 import { BotPnlStrip } from '../components/common/BotPnlStrip';
 import { StatCard } from '../components/common/Card';
@@ -693,11 +694,10 @@ export const GridBot: React.FC = () => {
           )}
           {/* ── Market ── */}
           <Section icon={<Layers size={12} />} label="Market">
-            <Input
-              label="Symbol"
+            <SymbolSelector
+              market={state.isSpot ? 'spot' : 'perps'}
               value={state.symbol}
-              onChange={(e) => state.setField('symbol', e.target.value)}
-              placeholder="e.g. BTC-USDC"
+              onChange={(val) => state.setField('symbol', val)}
               disabled={isLocked}
             />
             <div>
