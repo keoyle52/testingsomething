@@ -348,6 +348,20 @@ export const MarketMakerBot: React.FC = () => {
       // 6. Re-fill the ladder. We aim for `layers` open orders on
       //    each side. Anything missing gets posted at a price stepped
       //    away from the BBO by spreadBps (0 = join the queue).
+      //
+      //    INVENTORY-AWARE SEQUENTIAL MODE (spot):
+      //    On a spot venue we can only SELL what we actually own — the
+      //    base asset has to be in the wallet. Posting a SELL before
+      //    the matching BUY has filled is just rejected with
+      //    "insufficient balance" (which is what the user was hitting).
+      //    It's also a self-match / wash-trading risk on a thin testnet
+      //    book: paired BUY+SELL from the same wallet can match each
+      //    other, which SoDEX's anti-bot filter penalises.
+      //
+      //    Strategy: open the BUY ladder first to seed inventory, then
+      //    open SELL slots only up to whatever inventory has actually
+      //    accumulated from filled BUYs. Each open SELL "reserves" its
+      //    quantity so we don't double-commit the same coins.
       const buys = [...managedRef.current.values()].filter((o) => o.side === 'BUY');
       const sells = [...managedRef.current.values()].filter((o) => o.side === 'SELL');
       const targetLayers = layers;
@@ -355,7 +369,7 @@ export const MarketMakerBot: React.FC = () => {
 
       const qtyPerOrder = orderSize / topBid;       // base-asset qty for ~$orderSize notional
 
-      // Place missing buys
+      // Place missing buys (always allowed — buys grow inventory).
       for (let i = buys.length; i < targetLayers; i++) {
         // Layered prices step further outside the BBO by `i * tickSize`
         // so we don't stack multiple orders at the exact same price
@@ -364,10 +378,32 @@ export const MarketMakerBot: React.FC = () => {
         if (px <= 0) break;
         await placeMakerOrder('BUY', px, qtyPerOrder);
       }
-      // Place missing sells
-      for (let i = sells.length; i < targetLayers; i++) {
+
+      // Compute how many SELL slots we can safely open right now.
+      // reservedSellQty = base asset already committed to open SELLs.
+      const reservedSellQty = sells.reduce((acc, o) => acc + o.quantity, 0);
+      const availableInventory = Math.max(0, mm.inventoryBase - reservedSellQty);
+      const maxNewSellSlots = qtyPerOrder > 0
+        ? Math.floor(availableInventory / qtyPerOrder)
+        : 0;
+      const sellTargetLayers = Math.min(targetLayers, sells.length + maxNewSellSlots);
+
+      for (let i = sells.length; i < sellTargetLayers; i++) {
         const px = topAsk * (1 + offsetMul) + i * tickSize;
         await placeMakerOrder('SELL', px, qtyPerOrder);
+      }
+
+      // If we're holding back SELL slots because inventory hasn't
+      // accumulated yet, surface that to the user once per cycle so
+      // they don't think the bot is broken. We only log when the BUY
+      // ladder is full — otherwise the missing SELLs are obviously
+      // because BUYs haven't been placed yet either.
+      const skippedSells = targetLayers - sellTargetLayers;
+      if (skippedSells > 0 && buys.length >= targetLayers) {
+        pushLog('info',
+          `${skippedSells} SELL slot(s) waiting on inventory ` +
+          `(have ${availableInventory.toFixed(qtyPrec)}, need ${qtyPerOrder.toFixed(qtyPrec)} per slot)`,
+        );
       }
     } catch (err) {
       pushLog('error', `Reconcile error: ${getErrorMessage(err)}`);
@@ -488,10 +524,13 @@ export const MarketMakerBot: React.FC = () => {
         <div>
           <strong className="text-emerald-300">How it works:</strong>{' '}
           The bot posts <strong>post-only (GTX)</strong> limit orders just
-          inside the BBO. Every fill is a guaranteed <strong>maker fill</strong>
-          — typically half the taker fee. As the market moves, it requotes
-          stale orders and replaces filled ones. Goal: <em>maximum volume,
-          minimum fee</em>. Auto-stops on budget / volume / fee caps.
+          inside the BBO — every fill is a guaranteed <strong>maker fill</strong>.
+          Operates in <strong>inventory-aware sequential mode</strong>: BUYs are
+          placed first to seed inventory, then SELLs are opened only up to the
+          base asset actually accumulated from filled BUYs. This avoids
+          self-match / wash-trade flags and works on spot with zero starting
+          base balance. Goal: <em>maximum real volume, minimum fee</em>.
+          Auto-stops on budget / volume / fee caps.
         </div>
       </div>
 
