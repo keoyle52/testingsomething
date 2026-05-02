@@ -129,12 +129,12 @@ function App() {
   }, []);
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden text-text-primary font-sans antialiased bg-transparent selection:bg-primary/30">
+    <div className="flex h-screen w-screen overflow-hidden text-text-primary font-sans antialiased bg-background selection:bg-primary/20">
       <ScrollToTop />
       <Sidebar />
-      <div className="flex-1 flex flex-col overflow-hidden relative z-10 backdrop-blur-[2px]">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <Topbar />
-        <main id="app-main" className="flex-1 overflow-x-hidden overflow-y-auto p-4 md:p-6 lg:p-8">
+        <main id="app-main" className="flex-1 overflow-x-hidden overflow-y-auto p-5 md:p-6">
           <PageTransition>
             <Routes>
               {/* Settings loaded outside Suspense to avoid load stalls */}
@@ -180,20 +180,19 @@ function App() {
         toastOptions={{
           duration: 3500,
           style: {
-            background: 'rgba(14, 20, 29, 0.95)',
-            color: '#f0f4f8',
-            border: '1px solid rgba(0, 225, 255, 0.2)',
-            backdropFilter: 'blur(12px)',
-            borderRadius: '12px',
+            background: '#18181D',
+            color: '#F1F5F9',
+            border: '1px solid rgba(255, 255, 255, 0.09)',
+            borderRadius: '8px',
             fontSize: '13px',
-            padding: '12px 16px',
-            boxShadow: '0 8px 32px rgba(0, 225, 255, 0.1)',
+            padding: '10px 14px',
+            boxShadow: '0 4px 24px rgba(0, 0, 0, 0.5)',
           },
           success: {
-            iconTheme: { primary: '#00e676', secondary: '#06090e' },
+            iconTheme: { primary: '#34D399', secondary: '#18181D' },
           },
           error: {
-            iconTheme: { primary: '#ff3366', secondary: '#06090e' },
+            iconTheme: { primary: '#F87171', secondary: '#18181D' },
           },
         }}
       />
