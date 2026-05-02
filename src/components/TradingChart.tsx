@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { createChart, CandlestickSeries, type IChartApi, type ISeriesApi, type CandlestickData, type Time, ColorType } from 'lightweight-charts';
+import { createChart, CandlestickSeries, type IChartApi, type ISeriesApi, type CandlestickData, type Time, ColorType, type SeriesMarker } from 'lightweight-charts';
 import { fetchKlines } from '../api/services';
 import { cn } from '../lib/utils';
 
@@ -8,6 +8,7 @@ interface TradingChartProps {
   market?: 'spot' | 'perps';
   height?: number;
   className?: string;
+  markers?: SeriesMarker<Time>[];
 }
 
 const INTERVALS = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
@@ -17,6 +18,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   market = 'perps',
   height = 400,
   className,
+  markers = [],
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -82,6 +84,12 @@ export const TradingChart: React.FC<TradingChartProps> = ({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [height]);
+
+  useEffect(() => {
+    if (seriesRef.current) {
+      (seriesRef.current as any).setMarkers(markers);
+    }
+  }, [markers]);
 
   // Load/refresh data whenever symbol, interval, or market changes
   useEffect(() => {

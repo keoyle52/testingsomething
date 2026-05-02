@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { createDefaultSignals, type SignalConfig, type CombineMode } from '../api/signalEngine';
 
 /**
  * Professional-grade Grid Bot configuration. Mirrors the parameter
@@ -131,9 +132,57 @@ interface MarketMakerBotState {
   resetStats: () => void;
 }
 
+export interface SignalPosition {
+  id: string;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  quantity: number;
+  leverage: number;
+  tpPrice: number | null;
+  slPrice: number | null;
+  openTime: number;
+  triggeredBy: string[];
+  orderId?: string;
+  unrealizedPnl: number;
+  status: 'OPEN' | 'TP_HIT' | 'SL_HIT' | 'CLOSED_BY_SIGNAL' | 'MANUAL_CLOSE';
+}
+
+export type ConflictResolution = 'CLOSE_AND_REVERSE' | 'CLOSE_ONLY' | 'IGNORE';
+
+interface SignalBotState {
+  // ── Config ──
+  symbol: string;
+  isSpot: boolean;
+  leverage: string;
+  amountUsdt: string;
+  takeProfitPct: string;
+  stopLossPct: string;
+  // ── Signal Config ──
+  signals: SignalConfig[];
+  combineMode: CombineMode;
+  checkInterval: string;
+  klineInterval: string;
+  // ── Conflict Resolution ──
+  onConflictingSignal: ConflictResolution;
+  maxOpenPositions: string;
+  cooldownSeconds: string;
+  // ── Status ──
+  status: 'STOPPED' | 'RUNNING' | 'ERROR';
+  lastSignalTime: number | null;
+  lastSignalDirection: 'LONG' | 'SHORT' | null;
+  totalTrades: number;
+  winTrades: number;
+  realizedPnl: number;
+  activePositions: SignalPosition[];
+  setField: <K extends keyof SignalBotState>(field: K, value: SignalBotState[K]) => void;
+  resetStats: () => void;
+}
+
 interface BotStoreState {
   gridBot: GridBotState;
   marketMakerBot: MarketMakerBotState;
+  signalBot: SignalBotState;
 }
 
 export const useBotStore = create<BotStoreState>((set) => ({
@@ -222,6 +271,45 @@ export const useBotStore = create<BotStoreState>((set) => ({
           feesUsdt: 0,
           inventoryBase: 0,
           sessionStartedAt: null,
+        },
+      })),
+  },
+  signalBot: {
+    symbol: 'BTC-USD',
+    isSpot: false,
+    leverage: '5',
+    amountUsdt: '50',
+    takeProfitPct: '3',
+    stopLossPct: '2',
+    signals: createDefaultSignals(),
+    combineMode: 'ANY',
+    checkInterval: '60',
+    klineInterval: '15m',
+    onConflictingSignal: 'CLOSE_AND_REVERSE',
+    maxOpenPositions: '1',
+    cooldownSeconds: '120',
+    status: 'STOPPED',
+    lastSignalTime: null,
+    lastSignalDirection: null,
+    totalTrades: 0,
+    winTrades: 0,
+    realizedPnl: 0,
+    activePositions: [],
+    setField: (field, value) =>
+      set((state) => ({
+        signalBot: { ...state.signalBot, [field]: value },
+      })),
+    resetStats: () =>
+      set((state) => ({
+        signalBot: {
+          ...state.signalBot,
+          status: 'STOPPED',
+          lastSignalTime: null,
+          lastSignalDirection: null,
+          totalTrades: 0,
+          winTrades: 0,
+          realizedPnl: 0,
+          activePositions: [],
         },
       })),
   },

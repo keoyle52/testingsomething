@@ -5,7 +5,7 @@ import { persist } from 'zustand/middleware';
  * Identifier for every bot variant the terminal can run. Kept narrow so
  * the dashboard widget can render a stable per-bot stat strip.
  */
-export type BotKey = 'grid' | 'twap' | 'dca' | 'news' | 'predictor' | 'copy' | 'marketmaker';
+export type BotKey = 'grid' | 'twap' | 'dca' | 'news' | 'predictor' | 'copy' | 'marketmaker' | 'signal';
 
 export interface BotTrade {
   /** Always positive when winning, negative when losing. */
@@ -60,6 +60,7 @@ const initialBots: Record<BotKey, BotStats> = {
   predictor: emptyStats(),
   copy: emptyStats(),
   marketmaker: emptyStats(),
+  signal: emptyStats(),
 };
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -136,4 +137,5 @@ export const BOT_LABELS: Record<BotKey, string> = {
   predictor:   'BTC Predictor',
   copy:        'Copy Trader',
   marketmaker: 'Market Maker',
+  signal:      'Signal Bot',
 };

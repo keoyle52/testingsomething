@@ -42,6 +42,7 @@ const Alerts       = lazyFrom(() => import('./pages/Alerts').then(m => ({ defaul
 const Backtesting  = lazyFrom(() => import('./pages/Backtesting').then(m => ({ default: m.Backtesting })), 'Backtesting');
 const EtfTracker   = lazyFrom(() => import('./pages/EtfTracker').then(m => ({ default: m.EtfTracker })), 'EtfTracker');
 const NewsBot      = lazyFrom(() => import('./pages/NewsBot').then(m => ({ default: m.NewsBot })), 'NewsBot');
+const SignalBot    = lazyFrom(() => import('./pages/SignalBot').then(m => ({ default: m.SignalBot })), 'SignalBot');
 const BtcPredictor = lazyFrom(() => import('./pages/BtcPredictor').then(m => ({ default: m.BtcPredictor })), 'BtcPredictor');
 const AiConsole    = lazyFrom(() => import('./pages/AiConsole').then(m => ({ default: m.AiConsole })),       'AiConsole');
 const MacroCalendar  = lazyFrom(() => import('./pages/MacroCalendar').then(m => ({ default: m.MacroCalendar })),  'MacroCalendar');
@@ -157,6 +158,7 @@ function App() {
                       <Route path="/backtesting"     element={<Backtesting />} />
                       <Route path="/etf-tracker"     element={<EtfTracker />} />
                       <Route path="/news-bot"        element={<NewsBot />} />
+                      <Route path="/signal-bot"      element={<SignalBot />} />
                       <Route path="/btc-predictor"   element={<BtcPredictor />} />
                       <Route path="/ai-console"      element={<AiConsole />} />
                       <Route path="/macro"           element={<MacroCalendar />} />
