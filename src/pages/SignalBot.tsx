@@ -263,8 +263,8 @@ export const SignalBot: React.FC = () => {
               const t = m.time as number;
               if (timeMap.has(t)) {
                 const existing = timeMap.get(t)!;
-                if (!existing.text.includes(m.text)) {
-                   existing.text += `, ${m.text}`;
+                if (!(existing.text ?? '').includes(m.text ?? '')) {
+                   existing.text = `${existing.text ?? ''}, ${m.text ?? ''}`;
                 }
               } else {
                 timeMap.set(t, { ...m });

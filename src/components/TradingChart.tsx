@@ -23,7 +23,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const markersPrimitiveRef = useRef<ReturnType<typeof createSeriesMarkers> | null>(null);
+  const markersPrimitiveRef = useRef<{ detach: () => void } | null>(null);
   const [selectedInterval, setSelectedInterval] = useState<string>('1h');
   const [loading, setLoading] = useState(true);
 
