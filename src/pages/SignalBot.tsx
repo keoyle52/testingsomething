@@ -1,11 +1,11 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import { Play, Square, Radio, Settings2, Target, Zap, Activity } from 'lucide-react';
-import { useBotStore, type SignalPosition } from '../store/botStore';
+import { useBotStore, type SignalPosition, type ConflictResolution } from '../store/botStore';
 import { useBotPnlStore } from '../store/botPnlStore';
 import { useSettingsStore } from '../store/settingsStore';
-import { fetchKlines, placeOrder, updatePerpsLeverage, fetchBookTickers, normalizeSymbol } from '../api/services';
-import { evaluateSignals, resolveSignals, PARAM_LABELS, type CandleData, type SignalResult } from '../api/signalEngine';
+import { fetchKlines, placeOrder, updatePerpsLeverage, fetchBookTickers, normalizeSymbol, fetchOrderStatus, cancelOrder } from '../api/services';
+import { evaluateSignals, resolveSignals, PARAM_LABELS, type CandleData, type SignalResult, type CombineMode } from '../api/signalEngine';
 import { recommendSignalBot } from '../api/aiAutoConfig';
 import { cn, getErrorMessage } from '../lib/utils';
 import { TradingChart } from '../components/TradingChart';
@@ -40,110 +40,251 @@ export const SignalBot: React.FC = () => {
   const stopBot = useCallback(async (reason?: string) => {
     runningRef.current = false;
     if (loopRef.current) { clearInterval(loopRef.current); loopRef.current = null; }
+    // Cancel every server-side TP/SL stop we placed. If we don't, the
+    // exchange will keep them resting (they're reduceOnly so they can
+    // only close existing positions, but they still clutter the open-
+    // orders view and could accidentally close a position the user
+    // opens manually afterwards).
+    const fresh = useBotStore.getState().signalBot;
+    const market = fresh.isSpot ? 'spot' : 'perps';
+    const stopIds: string[] = [];
+    fresh.activePositions.forEach((p) => {
+      if (p.tpOrderId) stopIds.push(p.tpOrderId);
+      if (p.slOrderId) stopIds.push(p.slOrderId);
+    });
+    if (!isDemoMode && stopIds.length > 0) {
+      await Promise.all(stopIds.map((id) =>
+        cancelOrder(id, fresh.symbol, market).catch(() => { /* stop may already be gone */ }),
+      ));
+      addLog(`Cancelled ${stopIds.length} pending stop order(s)`, 'info');
+    }
     state.setField('status', 'STOPPED');
     addLog(`Bot stopped${reason ? `: ${reason}` : ''}`, 'warn');
-  }, [addLog, state]);
+  }, [addLog, state, isDemoMode]);
 
-  // Execute a trade based on signal decision
+  // Execute a trade based on signal decision.
+  //
+  // Pipeline:
+  //   1. Read the freshest bot state (the closure copy can be stale by the
+  //      time this async fn runs inside setInterval).
+  //   2. Guard: max-open-positions + leverage bounds.
+  //   3. Place a MARKET (IOC) entry order.
+  //   4. Resolve the REAL fill price via `fetchOrderStatus` — retrying for
+  //      up to ~2.4s because the `/trades` endpoint sometimes lags the
+  //      order-placement response. This avoids computing TP/SL + unrealized
+  //      PnL off the pre-trade mid-price, which can drift by a few bps on
+  //      the entry and make every position read as slightly-losing from
+  //      tick 1.
+  //   5. For PERPS only, place server-side TP and SL stop orders with
+  //      `reduceOnly: true` so TP/SL still fires if the browser is closed.
+  //      Spot has no stop-order primitive on SoDEX — we fall back to the
+  //      existing client-side checks in `evaluationLoop`.
   const executeTrade = useCallback(async (decision: 'LONG' | 'SHORT', currentPrice: number, signals: SignalResult[]) => {
-    const market = state.isSpot ? 'spot' : 'perps';
-    const amountUsdt = parseFloat(state.amountUsdt);
+    // Always read fresh: the setInterval closure can otherwise see a stale
+    // snapshot of activePositions / leverage after several in-flight ticks.
+    const fresh = useBotStore.getState().signalBot;
+    const market = fresh.isSpot ? 'spot' : 'perps';
+    const amountUsdt = parseFloat(fresh.amountUsdt);
     if (isNaN(amountUsdt) || amountUsdt <= 0) {
       addLog('Invalid Amount USDT, cannot trade', 'error');
       return;
     }
 
     try {
-      // 1. Check max open positions
-      if (state.activePositions.length >= parseInt(state.maxOpenPositions || '1')) {
+      // 1. Check max open positions (against the live store, not the closure)
+      if (fresh.activePositions.length >= parseInt(fresh.maxOpenPositions || '1')) {
         addLog('Max open positions reached, skipping signal', 'warn');
         return;
       }
 
       // 2. Set leverage if perps
-      let lev = parseInt(state.leverage);
-      if (!state.isSpot) {
+      let lev = parseInt(fresh.leverage);
+      if (!fresh.isSpot) {
         if (!Number.isFinite(lev) || lev < 1) lev = 1;
         if (!isDemoMode) {
-          await updatePerpsLeverage(state.symbol, lev, 2).catch((e) => {
+          await updatePerpsLeverage(fresh.symbol, lev, 2).catch((e) => {
             addLog(`Leverage update skipped: ${getErrorMessage(e)}`, 'warn');
           });
         }
+      } else {
+        lev = 1; // spot is always 1×
       }
 
       // 3. Calculate quantity
       const qty = (amountUsdt * lev) / currentPrice;
 
-      // 4. Place market order
+      // 4. Place market order (let placeOrder default timeInForce to IOC for
+      //    MARKET — GTC on a market order is nonsensical and was a vestigial
+      //    copy-paste from the old implementation).
       const side = decision === 'LONG' ? 1 : 2; // BUY = 1, SELL = 2
       let orderId = `demo-${Date.now()}`;
-      
+      let actualEntryPrice = currentPrice;
+      let actualQty = qty;
+
       if (!isDemoMode) {
         const res = await placeOrder({
-          symbol: state.symbol,
+          symbol: fresh.symbol,
           side,
           type: 2, // MARKET
           quantity: String(qty),
-          timeInForce: 1, // GTC
         }, market);
         const r = res as Record<string, unknown>;
         orderId = String(r?.orderID ?? r?.orderId ?? r?.id ?? orderId);
-      }
-      
-      addLog(`${isDemoMode ? '[DEMO] ' : ''}Opened ${decision} position @ ~${currentPrice.toFixed(2)} (${orderId})`, 'success');
 
-      // 5. Place TP/SL limit orders (Simulated here via client-side tracking, as SoDEX testnet TP/SL is spotty)
-      // We will track TP/SL purely client-side to ensure reliability across spot/perps
-      const tpPct = parseFloat(state.takeProfitPct);
-      const slPct = parseFloat(state.stopLossPct);
-      let tpPrice = null;
-      let slPrice = null;
-
-      if (!isNaN(tpPct) && tpPct > 0) {
-        tpPrice = decision === 'LONG' ? currentPrice * (1 + tpPct / 100) : currentPrice * (1 - tpPct / 100);
+        // 4a. Resolve REAL fill price. Retry because `/trades` can lag the
+        //     order response by ~300-1500ms on testnet. Three tries spaced
+        //     600ms apart covers ~2.4s which is enough for well over 99%
+        //     of fills; if we still have nothing we fall back to the
+        //     pre-trade mid-price and log a warning so the user knows
+        //     PnL may be off by a small amount for this position.
+        let resolved = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await new Promise((r) => setTimeout(r, 600));
+          try {
+            const status = await fetchOrderStatus(orderId, fresh.symbol, market);
+            if (status && status.filledQty > 0) {
+              actualEntryPrice = status.avgFillPrice;
+              actualQty = status.filledQty;
+              resolved = true;
+              break;
+            }
+            if (status && status.status === 'EXPIRED' && attempt === 2) {
+              addLog(`Order ${orderId} expired unfilled (IOC) — no position opened`, 'warn');
+              return;
+            }
+          } catch {
+            // swallow; retry loop handles it
+          }
+        }
+        if (!resolved) {
+          addLog(`Fill verification timed out — PnL will use mid-price ${currentPrice.toFixed(2)}`, 'warn');
+        }
       }
-      if (!isNaN(slPct) && slPct > 0) {
-        slPrice = decision === 'LONG' ? currentPrice * (1 - slPct / 100) : currentPrice * (1 + slPct / 100);
+
+      // 5. Compute TP/SL from the ACTUAL entry price (post-slippage).
+      const tpPct = parseFloat(fresh.takeProfitPct);
+      const slPct = parseFloat(fresh.stopLossPct);
+      const tpPrice = !isNaN(tpPct) && tpPct > 0
+        ? (decision === 'LONG' ? actualEntryPrice * (1 + tpPct / 100) : actualEntryPrice * (1 - tpPct / 100))
+        : null;
+      const slPrice = !isNaN(slPct) && slPct > 0
+        ? (decision === 'LONG' ? actualEntryPrice * (1 - slPct / 100) : actualEntryPrice * (1 + slPct / 100))
+        : null;
+
+      // 6. Server-side TP/SL stops (PERPS only — spot has no stop-order
+      //    primitive on SoDEX). These are the "browser-closed failsafe":
+      //    if the tab dies the exchange will still close the position at
+      //    TP or SL. The client-side checks in evaluationLoop remain as
+      //    the *primary* path because they're more responsive for logs
+      //    and stats, and they race-win in practice on well-connected
+      //    sessions.
+      let tpOrderId: string | undefined;
+      let slOrderId: string | undefined;
+      if (!isDemoMode && !fresh.isSpot) {
+        const closeSide: 1 | 2 = decision === 'LONG' ? 2 : 1;
+        if (tpPrice) {
+          try {
+            const res = await placeOrder({
+              symbol: fresh.symbol,
+              side: closeSide,
+              type: 2,              // MARKET trigger fill
+              quantity: String(actualQty),
+              stopPrice: String(tpPrice),
+              stopType: 2,          // TAKE_PROFIT
+              triggerType: 2,       // MARK_PRICE
+              reduceOnly: true,
+            }, 'perps');
+            tpOrderId = String((res as Record<string, unknown>)?.orderID ?? '');
+            addLog(`Server-side TP stop placed @ ${tpPrice.toFixed(2)} (${tpOrderId})`, 'success');
+          } catch (e) {
+            addLog(`Server-side TP stop failed (client-side failsafe will handle it): ${getErrorMessage(e)}`, 'warn');
+          }
+        }
+        if (slPrice) {
+          try {
+            const res = await placeOrder({
+              symbol: fresh.symbol,
+              side: closeSide,
+              type: 2,              // MARKET trigger fill
+              quantity: String(actualQty),
+              stopPrice: String(slPrice),
+              stopType: 1,          // STOP_LOSS
+              triggerType: 2,       // MARK_PRICE
+              reduceOnly: true,
+            }, 'perps');
+            slOrderId = String((res as Record<string, unknown>)?.orderID ?? '');
+            addLog(`Server-side SL stop placed @ ${slPrice.toFixed(2)} (${slOrderId})`, 'success');
+          } catch (e) {
+            addLog(`Server-side SL stop failed (client-side failsafe will handle it): ${getErrorMessage(e)}`, 'warn');
+          }
+        }
       }
 
-      // 6. Record position
+      // 7. Record position. Use functional setState so concurrent additions
+      //    (e.g. when maxOpenPositions > 1 and two signals fire within one
+      //    tick on different symbols) never overwrite each other.
       const newPos: SignalPosition = {
-        id: `pos-${Date.now()}`,
-        symbol: state.symbol,
+        id: `pos-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        symbol: fresh.symbol,
         side: decision,
-        entryPrice: currentPrice,
-        quantity: qty,
+        entryPrice: actualEntryPrice,
+        quantity: actualQty,
         leverage: lev,
         tpPrice,
         slPrice,
+        tpOrderId,
+        slOrderId,
         openTime: Date.now(),
-        triggeredBy: signals.map(s => s.label),
+        triggeredBy: signals.map((s) => s.label),
         orderId,
         unrealizedPnl: 0,
         status: 'OPEN',
       };
+      useBotStore.setState((s) => ({
+        signalBot: {
+          ...s.signalBot,
+          activePositions: [...s.signalBot.activePositions, newPos],
+          lastSignalTime: Date.now(),
+          lastSignalDirection: decision,
+        },
+      }));
 
-      state.setField('activePositions', [...state.activePositions, newPos]);
-      state.setField('lastSignalTime', Date.now());
-      state.setField('lastSignalDirection', decision);
-      
+      addLog(
+        `${isDemoMode ? '[DEMO] ' : ''}Opened ${decision} @ ${actualEntryPrice.toFixed(2)} × ${actualQty.toFixed(6)} (${orderId})`,
+        'success',
+      );
     } catch (err) {
       addLog(`Failed to execute ${decision}: ${getErrorMessage(err)}`, 'error');
+      useBotStore.setState((s) => ({ signalBot: { ...s.signalBot, status: 'ERROR' } }));
     }
-  }, [addLog, state]);
+  }, [addLog, isDemoMode]);
 
-  // Main evaluation loop
+  // Main evaluation loop.
+  //
+  // Runs every LOOP_INTERVAL (10s). Two concerns, separated by a timing gate:
+  //   A. HIGH-FREQ (every tick): refresh mid-price, update open-position
+  //      unrealized PnL, fire client-side TP/SL.
+  //   B. LOW-FREQ (every `checkInterval` seconds): fetch klines, evaluate
+  //      signals, resolve combined decision, possibly open / close /
+  //      reverse positions.
+  //
+  // We always read the FRESH bot state via `useBotStore.getState()` because
+  // the setInterval captures only the first render's closure — by iteration N
+  // the `state` snapshot in that closure is stale and would leak old
+  // `activePositions`, `lastSignalTime`, etc., into trading decisions.
   const evaluationLoop = useCallback(async () => {
     if (!runningRef.current) return;
-    const market = state.isSpot ? 'spot' : 'perps';
-    
+    // Pull the latest store state at the top of every tick.
+    const fresh = useBotStore.getState().signalBot;
+    const market = fresh.isSpot ? 'spot' : 'perps';
+
     try {
-      // 1. Fetch latest tickers to update PnL and check TP/SL
+      // ── A. HIGH-FREQ: price + TP/SL + PnL ─────────────────────────────
       const tickers = await fetchBookTickers(market);
       const arr = Array.isArray(tickers) ? tickers : [];
-      const normSym = normalizeSymbol(state.symbol, market);
+      const normSym = normalizeSymbol(fresh.symbol, market);
       const ticker = arr.find((t) => (t as Record<string, unknown>).symbol === normSym) as Record<string, unknown> | undefined;
-      
+
       let currentPrice = 0;
       if (ticker) {
         const bid = parseFloat(String(ticker.bidPrice ?? ticker.bid ?? '0'));
@@ -151,187 +292,281 @@ export const SignalBot: React.FC = () => {
         currentPrice = (bid + ask) / 2;
       }
 
-      if (currentPrice > 0) {
-        // Evaluate active positions for TP/SL
-        const activePos = [...state.activePositions];
-        let changed = false;
+      if (currentPrice > 0 && fresh.activePositions.length > 0) {
+        // Build a brand-new list — NEVER mutate existing position objects in
+        // place. The previous implementation assigned to `p.unrealizedPnl`
+        // and `p.status` directly, which (a) bypasses Zustand's change
+        // detection so UI does not re-render, and (b) leaks mutations
+        // across ticks because the closure and the store both point at the
+        // same objects.
+        const nextPositions: SignalPosition[] = [];
+        let pnlChanged = false;
+        let realizedDelta = 0;
+        let totalTradesDelta = 0;
+        let winTradesDelta = 0;
+        const trades: { pnl: number; note: string }[] = [];
+        const closeSideOrders: { side: 1 | 2; qty: number }[] = [];
+        const cancelStopIds: string[] = [];
 
-        for (let i = 0; i < activePos.length; i++) {
-          const p = activePos[i];
-          if (p.status !== 'OPEN') continue;
-
-          // Update Unrealized PnL
-          const pnlRatio = p.side === 'LONG' 
-            ? (currentPrice - p.entryPrice) / p.entryPrice 
-            : (p.entryPrice - currentPrice) / p.entryPrice;
-          p.unrealizedPnl = (p.quantity * p.entryPrice / p.leverage) * pnlRatio * p.leverage;
-
-          // Check TP
-          if (p.tpPrice) {
-            if ((p.side === 'LONG' && currentPrice >= p.tpPrice) || (p.side === 'SHORT' && currentPrice <= p.tpPrice)) {
-              p.status = 'TP_HIT';
-              changed = true;
-              addLog(`Take Profit hit for ${p.side} @ ${currentPrice.toFixed(2)}`, 'success');
-              
-              // Place closing market order
-              if (!isDemoMode) {
-                await placeOrder({ symbol: state.symbol, side: p.side === 'LONG' ? 2 : 1, type: 2, quantity: String(p.quantity), timeInForce: 1 }, market).catch(() => {});
-              }
-              
-              // Record PnL
-              state.setField('realizedPnl', state.realizedPnl + p.unrealizedPnl);
-              state.setField('totalTrades', state.totalTrades + 1);
-              state.setField('winTrades', state.winTrades + 1);
-              useBotPnlStore.getState().recordTrade('signal', { pnlUsdt: p.unrealizedPnl, ts: Date.now(), note: `${p.side} TP Hit` });
-            }
+        for (const p of fresh.activePositions) {
+          if (p.status !== 'OPEN') {
+            nextPositions.push(p);
+            continue;
           }
 
-          // Check SL
-          if (p.status === 'OPEN' && p.slPrice) {
-            if ((p.side === 'LONG' && currentPrice <= p.slPrice) || (p.side === 'SHORT' && currentPrice >= p.slPrice)) {
-              p.status = 'SL_HIT';
-              changed = true;
-              addLog(`Stop Loss hit for ${p.side} @ ${currentPrice.toFixed(2)}`, 'warn');
-              
-              // Place closing market order
-              if (!isDemoMode) {
-                await placeOrder({ symbol: state.symbol, side: p.side === 'LONG' ? 2 : 1, type: 2, quantity: String(p.quantity), timeInForce: 1 }, market).catch(() => {});
-              }
-              
-              // Record PnL
-              state.setField('realizedPnl', state.realizedPnl + p.unrealizedPnl);
-              state.setField('totalTrades', state.totalTrades + 1);
-              useBotPnlStore.getState().recordTrade('signal', { pnlUsdt: p.unrealizedPnl, ts: Date.now(), note: `${p.side} SL Hit` });
-            }
+          // Simplified PnL: notional P&L of the base qty. Leverage does NOT
+          // multiply the dollar PnL — it multiplies the RETURN on margin,
+          // not the dollar P&L itself. The previous formula had leverage
+          // on both sides which cancelled arithmetically but obscured intent.
+          const directional = p.side === 'LONG'
+            ? (currentPrice - p.entryPrice)
+            : (p.entryPrice - currentPrice);
+          const newPnl = p.quantity * directional;
+
+          // TP hit?
+          const tpHit = p.tpPrice != null && (
+            (p.side === 'LONG' && currentPrice >= p.tpPrice) ||
+            (p.side === 'SHORT' && currentPrice <= p.tpPrice)
+          );
+          // SL hit?
+          const slHit = !tpHit && p.slPrice != null && (
+            (p.side === 'LONG' && currentPrice <= p.slPrice) ||
+            (p.side === 'SHORT' && currentPrice >= p.slPrice)
+          );
+
+          if (tpHit || slHit) {
+            const status: SignalPosition['status'] = tpHit ? 'TP_HIT' : 'SL_HIT';
+            addLog(
+              `${tpHit ? 'Take Profit' : 'Stop Loss'} hit for ${p.side} @ ${currentPrice.toFixed(2)} (PnL ${newPnl >= 0 ? '+' : ''}${newPnl.toFixed(2)})`,
+              tpHit ? 'success' : 'warn',
+            );
+            // Queue a closing market order. reduceOnly=true so the
+            // server rejects if the position has already been closed
+            // by the sibling server-side stop firing first — preventing
+            // accidental flips.
+            closeSideOrders.push({ side: p.side === 'LONG' ? 2 : 1, qty: p.quantity });
+            // Cancel the sibling stop (the one that did NOT fire) so we
+            // don't leave a hanging reduce-only on the book that could
+            // open an unwanted counter-position on the next tick.
+            if (tpHit && p.slOrderId) cancelStopIds.push(p.slOrderId);
+            if (slHit && p.tpOrderId) cancelStopIds.push(p.tpOrderId);
+            // Also cancel the fired one defensively — if server-side
+            // stop already closed the position, this is a no-op; if it
+            // did not fire server-side for some reason, we clean it up.
+            if (tpHit && p.tpOrderId) cancelStopIds.push(p.tpOrderId);
+            if (slHit && p.slOrderId) cancelStopIds.push(p.slOrderId);
+
+            realizedDelta += newPnl;
+            totalTradesDelta += 1;
+            if (newPnl > 0) winTradesDelta += 1;
+            trades.push({ pnl: newPnl, note: `${p.side} ${tpHit ? 'TP' : 'SL'} Hit` });
+
+            nextPositions.push({ ...p, unrealizedPnl: newPnl, status });
+            pnlChanged = true;
+          } else if (newPnl !== p.unrealizedPnl) {
+            nextPositions.push({ ...p, unrealizedPnl: newPnl });
+            pnlChanged = true;
+          } else {
+            nextPositions.push(p);
           }
         }
 
-        if (changed) {
-          // Remove closed positions from active list (or keep them but mark closed)
-          state.setField('activePositions', activePos.filter(p => p.status === 'OPEN'));
-        } else {
-          state.setField('activePositions', activePos); // just to update PnL
+        // Fire the closing orders + stop cancellations concurrently. Each
+        // is individually try/caught so one bad call does not break the
+        // whole batch.
+        if (!isDemoMode && closeSideOrders.length > 0) {
+          await Promise.all(closeSideOrders.map((o) =>
+            placeOrder({
+              symbol: fresh.symbol, side: o.side, type: 2,
+              quantity: String(o.qty), reduceOnly: fresh.isSpot ? undefined : true,
+            }, market).catch((e) => {
+              addLog(`Close fill error: ${getErrorMessage(e)}`, 'warn');
+            }),
+          ));
         }
-      }
+        if (!isDemoMode && cancelStopIds.length > 0) {
+          await Promise.all(cancelStopIds.map((id) =>
+            cancelOrder(id, fresh.symbol, market).catch(() => { /* stop may already be gone */ }),
+          ));
+        }
 
-      // 2. Fetch Klines and run Signal Engine
-      const checkIntervalMs = parseInt(state.checkInterval) * 1000 || 60000;
-      const now = Date.now();
-      
-      // Only run expensive signal evaluation if interval has passed
-      if (now - lastProcessTimeRef.current >= checkIntervalMs) {
-        lastProcessTimeRef.current = now;
-
-        const rawKlines = await fetchKlines(state.symbol, state.klineInterval, 100, market);
-        const klines: CandleData[] = (Array.isArray(rawKlines) ? rawKlines : []).map(raw => {
-          const k = raw as Record<string, any>;
-          return {
-            time: typeof k.t === 'number' ? k.t : parseFloat(k.t || 0),
-            open: parseFloat(k.o || 0),
-            high: parseFloat(k.h || 0),
-            low: parseFloat(k.l || 0),
-            close: parseFloat(k.c || 0),
-            volume: parseFloat(k.v || 0)
-          };
-        }).filter(k => k.time > 0);
-
-        if (klines.length < 30) return;
-
-        const currentPriceEval = klines[klines.length - 1].close;
-
-        // Run signals
-        const results = evaluateSignals(klines, state.signals);
-        setActiveSignals(results);
-
-        // Add markers to chart
-        const newMarkers: SeriesMarker<Time>[] = [];
-        results.forEach(r => {
-          if (r.direction !== 'NEUTRAL') {
-            newMarkers.push({
-              time: klines[klines.length - 1].time as Time,
-              position: r.direction === 'LONG' ? 'belowBar' : 'aboveBar',
-              color: r.direction === 'LONG' ? '#3fb950' : '#f85149',
-              shape: r.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
-              text: r.label,
+        if (pnlChanged) {
+          // Single functional setState so counter updates accumulate
+          // atomically regardless of how many TP/SL fired this tick.
+          useBotStore.setState((s) => ({
+            signalBot: {
+              ...s.signalBot,
+              activePositions: nextPositions.filter((pos) => pos.status === 'OPEN'),
+              realizedPnl: s.signalBot.realizedPnl + realizedDelta,
+              totalTrades: s.signalBot.totalTrades + totalTradesDelta,
+              winTrades: s.signalBot.winTrades + winTradesDelta,
+            },
+          }));
+          trades.forEach((t) => {
+            useBotPnlStore.getState().recordTrade('signal', {
+              pnlUsdt: t.pnl, ts: Date.now(), note: t.note,
             });
-          }
-        });
-        if (newMarkers.length > 0) {
-          setChartMarkers(prev => {
-            const timeMap = new Map<number, SeriesMarker<Time>>();
-            const addMarker = (m: SeriesMarker<Time>) => {
-              const t = m.time as number;
-              if (timeMap.has(t)) {
-                const existing = timeMap.get(t)!;
-                if (!(existing.text ?? '').includes(m.text ?? '')) {
-                   existing.text = `${existing.text ?? ''}, ${m.text ?? ''}`;
-                }
-              } else {
-                timeMap.set(t, { ...m });
-              }
-            };
-            prev.forEach(addMarker);
-            newMarkers.forEach(addMarker);
-            return Array.from(timeMap.values())
-              .sort((a, b) => (a.time as number) - (b.time as number))
-              .slice(-50);
           });
         }
-
-        // Combine decisions
-        const decision = resolveSignals(results, state.combineMode);
-
-        if (decision.action !== 'NONE') {
-          // Check cooldown
-          const cooldownMs = parseInt(state.cooldownSeconds) * 1000 || 120000;
-          if (state.lastSignalTime && (now - state.lastSignalTime < cooldownMs)) {
-            // In cooldown
-            return;
-          }
-
-          // Check conflict resolution
-          const activePos = state.activePositions[0]; // just check the first one for simplicity
-          if (activePos && activePos.side !== decision.action) {
-            addLog(`Conflicting signal: ${decision.action} while holding ${activePos.side}`, 'warn');
-            
-            if (state.onConflictingSignal === 'IGNORE') {
-              return;
-            }
-            
-            if (state.onConflictingSignal === 'CLOSE_ONLY' || state.onConflictingSignal === 'CLOSE_AND_REVERSE') {
-              // Close position
-              if (!isDemoMode) {
-                await placeOrder({ symbol: state.symbol, side: activePos.side === 'LONG' ? 2 : 1, type: 2, quantity: String(activePos.quantity), timeInForce: 1 }, market).catch(() => {});
-              }
-              
-              // Record PnL
-              state.setField('realizedPnl', state.realizedPnl + activePos.unrealizedPnl);
-              state.setField('totalTrades', state.totalTrades + 1);
-              if (activePos.unrealizedPnl > 0) state.setField('winTrades', state.winTrades + 1);
-              useBotPnlStore.getState().recordTrade('signal', { pnlUsdt: activePos.unrealizedPnl, ts: Date.now(), note: `Closed by Signal` });
-              
-              state.setField('activePositions', state.activePositions.filter(p => p.id !== activePos.id));
-              addLog(`Position closed due to conflict`, 'info');
-
-              if (state.onConflictingSignal === 'CLOSE_ONLY') {
-                return;
-              }
-            }
-          } else if (activePos && activePos.side === decision.action) {
-            // Already holding same direction
-            return;
-          }
-
-          // Execute new trade
-          addLog(`Signal Engine triggered: ${decision.action}. Reasoning: ${decision.reasoning}`, 'info');
-          await executeTrade(decision.action, currentPriceEval, decision.signals);
-        }
       }
 
+      // ── B. LOW-FREQ: signal evaluation ────────────────────────────────
+      const checkIntervalMs = parseInt(fresh.checkInterval) * 1000 || 60000;
+      const now = Date.now();
+      if (now - lastProcessTimeRef.current < checkIntervalMs) return;
+      lastProcessTimeRef.current = now;
+
+      // Bypass the 30s shared kline cache so the signal engine always sees
+      // the freshest forming-candle data.
+      const rawKlines = await fetchKlines(fresh.symbol, fresh.klineInterval, 100, market, { bypassCache: true });
+      const klines: CandleData[] = (Array.isArray(rawKlines) ? rawKlines : []).map((raw) => {
+        const k = raw as Record<string, unknown>;
+        const pNum = (v: unknown) => parseFloat(String(v ?? 0));
+        return {
+          time: typeof k.t === 'number' ? k.t : pNum(k.t),
+          open: pNum(k.o),
+          high: pNum(k.h),
+          low: pNum(k.l),
+          close: pNum(k.c),
+          volume: pNum(k.v),
+        };
+      }).filter((k) => k.time > 0);
+
+      if (klines.length < 30) return;
+
+      const currentPriceEval = klines[klines.length - 1].close;
+
+      // Re-read positions after the awaited network calls above so we work
+      // against the post-TP/SL snapshot, not the pre-tick one.
+      const afterTPSL = useBotStore.getState().signalBot;
+
+      // Run signals
+      const results = evaluateSignals(klines, afterTPSL.signals);
+      setActiveSignals(results);
+
+      // Add markers to chart
+      const newMarkers: SeriesMarker<Time>[] = [];
+      results.forEach((r) => {
+        if (r.direction !== 'NEUTRAL') {
+          newMarkers.push({
+            time: klines[klines.length - 1].time as Time,
+            position: r.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+            color: r.direction === 'LONG' ? '#3fb950' : '#f85149',
+            shape: r.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+            text: r.label,
+          });
+        }
+      });
+      if (newMarkers.length > 0) {
+        setChartMarkers((prev) => {
+          const timeMap = new Map<number, SeriesMarker<Time>>();
+          const addMarker = (m: SeriesMarker<Time>) => {
+            const t = m.time as number;
+            if (timeMap.has(t)) {
+              const existing = timeMap.get(t)!;
+              if (!(existing.text ?? '').includes(m.text ?? '')) {
+                existing.text = `${existing.text ?? ''}, ${m.text ?? ''}`;
+              }
+            } else {
+              timeMap.set(t, { ...m });
+            }
+          };
+          prev.forEach(addMarker);
+          newMarkers.forEach(addMarker);
+          return Array.from(timeMap.values())
+            .sort((a, b) => (a.time as number) - (b.time as number))
+            .slice(-50);
+        });
+      }
+
+      // Combine decisions
+      const decision = resolveSignals(results, afterTPSL.combineMode);
+      if (decision.action === 'NONE') return;
+
+      // Cooldown check (global, not per-position)
+      const cooldownMs = parseInt(afterTPSL.cooldownSeconds) * 1000 || 120000;
+      if (afterTPSL.lastSignalTime && now - afterTPSL.lastSignalTime < cooldownMs) return;
+
+      // Conflict resolution — check ALL open positions, not just the first.
+      // Previously `activePositions[0]` was the only one considered, which
+      // meant maxOpenPositions>1 setups would silently skip the check for
+      // the later positions and could end up holding both directions at
+      // once when conflicting signals fired.
+      const openSame = afterTPSL.activePositions.filter((p) => p.status === 'OPEN' && p.side === decision.action);
+      const openOpposite = afterTPSL.activePositions.filter((p) => p.status === 'OPEN' && p.side !== decision.action);
+
+      if (openOpposite.length > 0) {
+        addLog(`Conflicting signal: ${decision.action} vs ${openOpposite.length} open ${openOpposite[0].side} position(s)`, 'warn');
+
+        if (afterTPSL.onConflictingSignal === 'IGNORE') return;
+
+        // CLOSE_ONLY or CLOSE_AND_REVERSE: close every opposite-side position.
+        let realized = 0;
+        let tradesCount = 0;
+        let wins = 0;
+        const closedIds = new Set<string>();
+        const cancelIds: string[] = [];
+        const closeOrders: { side: 1 | 2; qty: number }[] = [];
+        const pnlEntries: { pnl: number; note: string }[] = [];
+
+        for (const p of openOpposite) {
+          // Use the just-refreshed unrealized PnL; if for any reason it's
+          // zero (very first tick of a new pos), compute on the fly.
+          const currentPnl = p.unrealizedPnl !== 0
+            ? p.unrealizedPnl
+            : p.quantity * (p.side === 'LONG' ? currentPriceEval - p.entryPrice : p.entryPrice - currentPriceEval);
+          closeOrders.push({ side: p.side === 'LONG' ? 2 : 1, qty: p.quantity });
+          if (p.tpOrderId) cancelIds.push(p.tpOrderId);
+          if (p.slOrderId) cancelIds.push(p.slOrderId);
+          realized += currentPnl;
+          tradesCount += 1;
+          if (currentPnl > 0) wins += 1;
+          closedIds.add(p.id);
+          pnlEntries.push({ pnl: currentPnl, note: 'Closed by Signal' });
+        }
+
+        if (!isDemoMode) {
+          await Promise.all(closeOrders.map((o) =>
+            placeOrder({
+              symbol: fresh.symbol, side: o.side, type: 2,
+              quantity: String(o.qty), reduceOnly: fresh.isSpot ? undefined : true,
+            }, market).catch((e) => addLog(`Close fill error: ${getErrorMessage(e)}`, 'warn')),
+          ));
+          await Promise.all(cancelIds.map((id) =>
+            cancelOrder(id, fresh.symbol, market).catch(() => {}),
+          ));
+        }
+
+        useBotStore.setState((s) => ({
+          signalBot: {
+            ...s.signalBot,
+            activePositions: s.signalBot.activePositions.filter((p) => !closedIds.has(p.id)),
+            realizedPnl: s.signalBot.realizedPnl + realized,
+            totalTrades: s.signalBot.totalTrades + tradesCount,
+            winTrades: s.signalBot.winTrades + wins,
+          },
+        }));
+        pnlEntries.forEach((t) =>
+          useBotPnlStore.getState().recordTrade('signal', { pnlUsdt: t.pnl, ts: Date.now(), note: t.note }),
+        );
+        addLog(`Closed ${tradesCount} opposite-side position(s) (realized ${realized >= 0 ? '+' : ''}${realized.toFixed(2)})`, 'info');
+
+        if (afterTPSL.onConflictingSignal === 'CLOSE_ONLY') return;
+        // else CLOSE_AND_REVERSE: fall through and open fresh position.
+      } else if (openSame.length > 0) {
+        // Already holding same direction — nothing to do.
+        return;
+      }
+
+      // Execute new trade.
+      addLog(`Signal Engine triggered: ${decision.action} — ${decision.reasoning}`, 'info');
+      await executeTrade(decision.action, currentPriceEval, decision.signals);
     } catch (err) {
       addLog(`Loop error: ${getErrorMessage(err)}`, 'error');
+      // Non-fatal: the loop keeps running. Hard errors in executeTrade
+      // (e.g. auth failure) already flip status to ERROR from there.
     }
-  }, [addLog, executeTrade, state]);
+  }, [addLog, executeTrade, isDemoMode]);
 
   // Start Bot
   const startBot = useCallback(async () => {
@@ -355,6 +590,11 @@ export const SignalBot: React.FC = () => {
   }, [addLog, evaluationLoop, state]);
 
   useEffect(() => {
+    // Stop the loop on unmount. We intentionally do NOT auto-cancel the
+    // server-side TP/SL stops here — that's the whole point of server-side
+    // stops: they must survive the tab closing. The user stopping the bot
+    // explicitly via the Stop button (handled by `stopBot`) *will* clean
+    // them up; nav-away / reload leaves them live on purpose.
     return () => {
       runningRef.current = false;
       if (loopRef.current) clearInterval(loopRef.current);
@@ -363,26 +603,57 @@ export const SignalBot: React.FC = () => {
 
   const isLocked = state.status === 'RUNNING';
 
-  const closePosition = async (posId: string) => {
-    const pos = state.activePositions.find(p => p.id === posId);
+  const closePosition = useCallback(async (posId: string) => {
+    // Always resolve from the freshest store snapshot so closing a position
+    // that has just had its PnL updated mid-click uses the new PnL value.
+    const fresh = useBotStore.getState().signalBot;
+    const pos = fresh.activePositions.find((p) => p.id === posId);
     if (!pos) return;
-    
-    const market = state.isSpot ? 'spot' : 'perps';
+
+    const market = pos.symbol.includes('-') ? 'perps' : 'spot';
+    const closedAt = Date.now();
     try {
       if (!isDemoMode) {
-        await placeOrder({ symbol: state.symbol, side: pos.side === 'LONG' ? 2 : 1, type: 2, quantity: String(pos.quantity), timeInForce: 1 }, market);
+        // Close the position first, then cancel any lingering stops. We
+        // intentionally close BEFORE cancelling so a network blip
+        // cancelling the stops won't leave the position open unhedged.
+        await placeOrder({
+          symbol: pos.symbol,
+          side: pos.side === 'LONG' ? 2 : 1,
+          type: 2,
+          quantity: String(pos.quantity),
+          reduceOnly: market === 'perps' ? true : undefined,
+        }, market);
+        const stopIds = [pos.tpOrderId, pos.slOrderId].filter(Boolean) as string[];
+        if (stopIds.length > 0) {
+          await Promise.all(stopIds.map((id) =>
+            cancelOrder(id, pos.symbol, market).catch(() => {}),
+          ));
+        }
       }
-      state.setField('realizedPnl', state.realizedPnl + pos.unrealizedPnl);
-      state.setField('totalTrades', state.totalTrades + 1);
-      if (pos.unrealizedPnl > 0) state.setField('winTrades', state.winTrades + 1);
-      useBotPnlStore.getState().recordTrade('signal', { pnlUsdt: pos.unrealizedPnl, ts: Date.now(), note: 'Manual Close' });
-      state.setField('activePositions', state.activePositions.filter(p => p.id !== posId));
-      addLog(`Position manually closed`, 'success');
+      // Atomic counter updates via functional setState.
+      useBotStore.setState((s) => {
+        const wasWin = pos.unrealizedPnl > 0;
+        return {
+          signalBot: {
+            ...s.signalBot,
+            realizedPnl: s.signalBot.realizedPnl + pos.unrealizedPnl,
+            totalTrades: s.signalBot.totalTrades + 1,
+            winTrades: s.signalBot.winTrades + (wasWin ? 1 : 0),
+            activePositions: s.signalBot.activePositions.filter((p) => p.id !== posId),
+          },
+        };
+      });
+      useBotPnlStore.getState().recordTrade('signal', {
+        pnlUsdt: pos.unrealizedPnl, ts: closedAt, note: 'Manual Close',
+      });
+      addLog(`Position manually closed (PnL ${pos.unrealizedPnl >= 0 ? '+' : ''}${pos.unrealizedPnl.toFixed(2)})`, 'success');
       toast.success('Position closed');
     } catch (e) {
       toast.error(`Close failed: ${getErrorMessage(e)}`);
+      addLog(`Close failed: ${getErrorMessage(e)}`, 'error');
     }
-  };
+  }, [addLog, isDemoMode]);
 
   const toggleSignal = (id: string, enabled: boolean) => {
     if (isLocked) return;
@@ -428,12 +699,12 @@ export const SignalBot: React.FC = () => {
               if (preset.amountUsdt)         state.setField('amountUsdt', String(preset.amountUsdt));
               if (preset.takeProfitPct)      state.setField('takeProfitPct', String(preset.takeProfitPct));
               if (preset.stopLossPct)        state.setField('stopLossPct', String(preset.stopLossPct));
-              if (preset.combineMode)        state.setField('combineMode', preset.combineMode as any);
+              if (preset.combineMode)        state.setField('combineMode', preset.combineMode as CombineMode);
               if (preset.checkInterval)      state.setField('checkInterval', String(preset.checkInterval));
               if (preset.klineInterval)      state.setField('klineInterval', String(preset.klineInterval));
               if (preset.cooldownSeconds)    state.setField('cooldownSeconds', String(preset.cooldownSeconds));
               if (preset.maxOpenPositions)   state.setField('maxOpenPositions', String(preset.maxOpenPositions));
-              if (preset.onConflictingSignal) state.setField('onConflictingSignal', preset.onConflictingSignal as any);
+              if (preset.onConflictingSignal) state.setField('onConflictingSignal', preset.onConflictingSignal as ConflictResolution);
               if (preset.isSpot !== undefined) state.setField('isSpot', preset.isSpot === 'true');
               // Deserialise and apply signal configs
               if (preset.signalsJson) {
@@ -513,7 +784,7 @@ export const SignalBot: React.FC = () => {
               <Select
                 label="Combination Mode"
                 value={state.combineMode}
-                onChange={(e) => state.setField('combineMode', e.target.value as any)}
+                onChange={(e) => state.setField('combineMode', e.target.value as CombineMode)}
                 disabled={isLocked}
                 options={[
                   { value: 'ANY', label: 'ANY - If any signal triggers' },
@@ -587,7 +858,7 @@ export const SignalBot: React.FC = () => {
                 <Select
                   label="On Conflict"
                   value={state.onConflictingSignal}
-                  onChange={(e) => state.setField('onConflictingSignal', e.target.value as any)}
+                  onChange={(e) => state.setField('onConflictingSignal', e.target.value as ConflictResolution)}
                   disabled={isLocked}
                   options={[
                     { value: 'CLOSE_AND_REVERSE', label: 'Close & Reverse' },

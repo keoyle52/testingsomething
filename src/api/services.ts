@@ -819,13 +819,20 @@ export async function fetchKlines(
   interval = '1h',
   limit = 100,
   market: 'spot' | 'perps' = 'perps',
+  options?: { bypassCache?: boolean },
 ) {
   if (isDemo()) return getDemoKlines(symbol, interval, limit);
   const sym = normalizeSymbol(symbol, market);
   const cacheKey = `${getNetworkTag()}:${market}:${sym}:${interval}:${limit}`;
-  const cached = _klinesCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < QUOTE_CACHE_TTL) {
-    return cached.data as Record<string, unknown>[];
+  // Bot loops pass `bypassCache: true` so every signal evaluation works on
+  // the freshest kline data — the 30s shared cache is tuned for UI re-renders,
+  // not for trading-decision inputs where a stale forming-candle close can
+  // mask a just-formed crossover.
+  if (!options?.bypassCache) {
+    const cached = _klinesCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < QUOTE_CACHE_TTL) {
+      return cached.data as Record<string, unknown>[];
+    }
   }
   const client = getClient(market);
   const res = await withRetry(() => client.get(`/markets/${sym}/klines`, { params: { interval, limit } }));

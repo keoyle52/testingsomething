@@ -144,6 +144,12 @@ export interface SignalPosition {
   openTime: number;
   triggeredBy: string[];
   orderId?: string;
+  /** Server-side take-profit stop order id (perps only). Used so the bot can
+   *  cancel the hanging stop when the position is closed by any other path
+   *  (manual close, conflict resolution, or the sibling SL firing first). */
+  tpOrderId?: string;
+  /** Server-side stop-loss stop order id (perps only). See `tpOrderId`. */
+  slOrderId?: string;
   unrealizedPnl: number;
   status: 'OPEN' | 'TP_HIT' | 'SL_HIT' | 'CLOSED_BY_SIGNAL' | 'MANUAL_CLOSE';
 }

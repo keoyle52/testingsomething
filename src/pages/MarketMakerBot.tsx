@@ -16,6 +16,7 @@ import {
   fetchOpenOrders,
   fetchSymbolTradingRules,
   fetchBookTickers,
+  fetchOrderStatus,
   placeOrder,
   batchCancelOrders,
 } from '../api/services';
@@ -64,6 +65,11 @@ const MAX_LOG_ENTRIES = 80;
 const CLOID_PREFIX = 'mm_';
 // Bps → fraction multiplier. 1 bp = 0.0001 = 0.01%.
 const BPS = 1 / 10_000;
+// Consecutive reconcile failures that flip the bot into ERROR state and
+// auto-stop. Tuned for the 5s poll cadence — 4 × 5s = 20s of hard-failing
+// before giving up, which covers transient network blips while still
+// surfacing genuine auth / permission failures promptly.
+const MAX_CONSECUTIVE_ERRORS = 4;
 
 interface LogEntry {
   ts: number;
@@ -139,9 +145,15 @@ export const MarketMakerBot: React.FC = () => {
   // into the same slot. Avoids the race where managedRef has dropped
   // an order but the exchange still has it locked against our balance.
   const lastCancelAtRef = useRef(0);
+  // Consecutive reconcile failures. Reset to zero on every clean tick.
+  // Once this hits MAX_CONSECUTIVE_ERRORS we assume the failure is
+  // structural (auth expired, account restricted, network partition)
+  // rather than transient and auto-stop the bot into ERROR state so
+  // the user knows intervention is required.
+  const consecutiveErrorsRef = useRef(0);
   // Forward ref to stopBotInternal so reconcile can invoke it without
   // a circular dependency between the two useCallbacks.
-  const stopBotInternalRef = useRef<() => Promise<void>>(async () => {});
+  const stopBotInternalRef = useRef<(reason?: 'STOPPED' | 'ERROR') => Promise<void>>(async () => {});
 
   // ── Logging helper. Bounded to MAX_LOG_ENTRIES. Newest first. ─────
   const pushLog = useCallback((type: LogEntry['type'], message: string) => {
@@ -296,48 +308,97 @@ export const MarketMakerBot: React.FC = () => {
       }
 
       // 3. Reconcile filled / cancelled orders. Anything we tracked
-      //    that is no longer open MUST have either filled (the common
-      //    case) or been cancelled by the exchange (rare).
+      //    that is no longer open is either filled (common), cancelled
+      //    by the exchange (e.g. post-only rejected on a race), or
+      //    expired. Disambiguate by querying the trades endpoint per
+      //    missing order — the old code optimistically counted every
+      //    missing order as filled, which inflated volume and bled
+      //    fake fees whenever the exchange rejected a post-only race.
+      //
+      //    We resolve all missing orders concurrently (one HTTP round-
+      //    trip per missing cloid) and only credit as FILLED those that
+      //    actually had trades. Orders that returned EXPIRED / no fills
+      //    are logged as cancelled-by-exchange without touching volume,
+      //    fee, or inventory counters.
+      const missingEntries: [string, ManagedOrder][] = [];
       const stillOpen = new Map<string, ManagedOrder>();
       for (const [cloid, mo] of managedRef.current.entries()) {
         if (openByCloid.has(cloid)) {
           stillOpen.set(cloid, mo);
         } else {
-          // Determine whether it filled or was cancelled by inspecting
-          // the persisted order log if available. SoDEX's
-          // /accounts/{address}/orders/history could disambiguate, but
-          // for now we treat "missing" as filled — the optimistic
-          // assumption that matches GTX semantics (orders only leave
-          // the book via fill or explicit cancel).
-          const filledNotional = mo.price * mo.quantity;
-          const fee = filledNotional * feeRate;
-          // NOTE: maker fees on buy side debit base asset on a real
-          // exchange; we lump everything into USDT-equivalent for the
-          // UI. The fee figure is an estimate — the real number depends
-          // on stake-tier discounts.
-          // Use bumpField (functional update) so multiple fills in the
-          // same reconcile pass accumulate correctly instead of each
-          // call overwriting the previous with a stale-closure base.
-          bumpField('ordersFilled', 1);
-          bumpField('volumeUsdt', filledNotional);
-          bumpField('feesUsdt', fee);
-          // Inventory drifts opposite to the side that just filled —
-          // a BUY fill increases inventory by quantity, a SELL fill
-          // reduces it.
-          bumpField('inventoryBase', mo.side === 'BUY' ? mo.quantity : -mo.quantity);
-          // Aggregate the fee as a "negative PnL" on the bot strip so
-          // the user can see fee burn at a glance. Real PnL would
-          // include inventory revaluation but that is noisy at sub-
-          // bp scales — the fee figure dominates over short windows.
-          recordTrade('marketmaker', {
-            pnlUsdt: -fee,
-            ts: nowMs(),
-            note: `${mo.side} fill ${mo.quantity.toFixed(qtyPrec)} ${mm.symbol} @ ${mo.price.toFixed(pricePrec)}`,
-          });
-          pushLog('fill', `✓ ${mo.side} ${mo.quantity.toFixed(qtyPrec)} @ ${mo.price.toFixed(pricePrec)} filled — vol +$${filledNotional.toFixed(2)}, fee est $${fee.toFixed(4)}`);
+          missingEntries.push([cloid, mo]);
         }
       }
       managedRef.current = stillOpen;
+
+      if (missingEntries.length > 0) {
+        const verifications = await Promise.all(missingEntries.map(async ([cloid, mo]) => {
+          const id = mo.orderID ?? cloid;
+          try {
+            const status = await fetchOrderStatus(id, mm.symbol, 'spot');
+            return { cloid, mo, status };
+          } catch {
+            return { cloid, mo, status: null };
+          }
+        }));
+
+        for (const { mo, status } of verifications) {
+          // Decide: FILLED, CANCELLED, or UNVERIFIABLE.
+          //   - FILLED: real trades exist → credit volume/fee/inventory
+          //     using EXCHANGE-REPORTED values (filledQty, avgFillPrice,
+          //     totalFee) rather than the originally-posted price × qty.
+          //   - EXPIRED: no trades exist → treat as exchange cancellation.
+          //   - null (endpoint unreachable): fall back to the old
+          //     optimistic "posted = filled" assumption with an estimated
+          //     fee so a temporary /trades outage does not wipe the
+          //     session stats. Log that it's an unverified credit.
+          if (status && status.status === 'FILLED' && status.filledQty > 0) {
+            const realQty = status.filledQty;
+            const realPrice = status.avgFillPrice > 0 ? status.avgFillPrice : mo.price;
+            const realNotional = status.filledValue > 0 ? status.filledValue : realQty * realPrice;
+            const realFee = status.totalFee > 0 ? status.totalFee : realNotional * feeRate;
+
+            bumpField('ordersFilled', 1);
+            bumpField('volumeUsdt', realNotional);
+            bumpField('feesUsdt', realFee);
+            bumpField('inventoryBase', mo.side === 'BUY' ? realQty : -realQty);
+
+            recordTrade('marketmaker', {
+              pnlUsdt: -realFee,
+              ts: nowMs(),
+              note: `${mo.side} fill ${realQty.toFixed(qtyPrec)} ${mm.symbol} @ ${realPrice.toFixed(pricePrec)}`,
+            });
+            pushLog(
+              'fill',
+              `✓ ${mo.side} ${realQty.toFixed(qtyPrec)} @ ${realPrice.toFixed(pricePrec)} filled — vol +$${realNotional.toFixed(2)}, fee $${realFee.toFixed(4)}`,
+            );
+          } else if (status && status.status === 'EXPIRED') {
+            // No trades for this order → exchange cancelled or GTX
+            // post-only rejected it. Do not touch counters.
+            bumpField('ordersCancelled', 1);
+            pushLog('cancel', `✗ ${mo.side} ${mo.quantity.toFixed(qtyPrec)} @ ${mo.price.toFixed(pricePrec)} cancelled by exchange (no fills)`);
+          } else {
+            // Unverifiable — /trades endpoint failed. Fall back to
+            // optimistic fill crediting with estimated fee, but log
+            // explicitly so the user can see we're guessing.
+            const filledNotional = mo.price * mo.quantity;
+            const fee = filledNotional * feeRate;
+            bumpField('ordersFilled', 1);
+            bumpField('volumeUsdt', filledNotional);
+            bumpField('feesUsdt', fee);
+            bumpField('inventoryBase', mo.side === 'BUY' ? mo.quantity : -mo.quantity);
+            recordTrade('marketmaker', {
+              pnlUsdt: -fee,
+              ts: nowMs(),
+              note: `${mo.side} fill ${mo.quantity.toFixed(qtyPrec)} ${mm.symbol} @ ${mo.price.toFixed(pricePrec)} (unverified)`,
+            });
+            pushLog(
+              'fill',
+              `~ ${mo.side} ${mo.quantity.toFixed(qtyPrec)} @ ${mo.price.toFixed(pricePrec)} (unverified — /trades failed) vol +$${filledNotional.toFixed(2)}`,
+            );
+          }
+        }
+      }
 
       // 4. Stop conditions check — bail before placing more orders.
       // Read from the store directly so we see the fresh totals after
@@ -504,20 +565,36 @@ export const MarketMakerBot: React.FC = () => {
           `(have ${availableInventory.toFixed(qtyPrec)}, need ${qtyPerOrder.toFixed(qtyPrec)} per slot)`,
         );
       }
+      // Tick reached the end without throwing — clear the failure streak
+      // so a single future network blip is not counted against the last
+      // successful reconcile.
+      consecutiveErrorsRef.current = 0;
     } catch (err) {
-      pushLog('error', `Reconcile error: ${getErrorMessage(err)}`);
+      consecutiveErrorsRef.current += 1;
+      const msg = getErrorMessage(err);
+      pushLog(
+        'error',
+        `Reconcile error (${consecutiveErrorsRef.current}/${MAX_CONSECUTIVE_ERRORS}): ${msg}`,
+      );
+      if (consecutiveErrorsRef.current >= MAX_CONSECUTIVE_ERRORS) {
+        pushLog(
+          'error',
+          `Giving up after ${MAX_CONSECUTIVE_ERRORS} consecutive failures — auto-stopping into ERROR state. Check credentials / network and restart.`,
+        );
+        // Fire and forget; we cannot await inside the catch because we're
+        // still holding the reconcile-busy guard — release it via finally,
+        // then let the stop helper flip status + cancel resting orders.
+        void stopBotInternalRef.current('ERROR');
+      }
     } finally {
       setBusy(false);
       reconcileBusyRef.current = false;
     }
     // The dependency list is intentionally narrow — the rest is read
     // through refs so the polling timer doesn't churn every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    // Dependencies are only the values actually read as plain (non-
-    // ref, non-store-functional) inputs. Counters that we only ever
-    // increment via bumpField are intentionally NOT in this list —
-    // including them would churn the callback identity and re-break
-    // the reconcileRef pattern below.
+    // Counters that we only ever increment via bumpField are intentionally
+    // NOT in this list — including them would churn the callback identity
+    // and re-break the reconcileRef pattern below.
   }, [mm.symbol, mm.requoteBps, mm.spreadBps,
       tickSize, qtyPrec, pricePrec, layers, orderSize, feeRate, budget,
       volTarget, feeBudget, placeMakerOrder, pushLog, bumpField, recordTrade]);
@@ -538,13 +615,22 @@ export const MarketMakerBot: React.FC = () => {
   useEffect(() => { reconcileRef.current = reconcile; }, [reconcile]);
 
   // Stop helper used by both manual button + auto-stop conditions.
-  const stopBotInternal = useCallback(async (): Promise<void> => {
+  //
+  // `finalStatus` defaults to `'STOPPED'` for normal shutdowns (user click,
+  // volume target, fee budget). The reconcile loop passes `'ERROR'` when
+  // it auto-stops after too many consecutive failures so the StatusBadge
+  // stays red and the user sees that intervention is required, not a
+  // clean session end.
+  const stopBotInternal = useCallback(async (finalStatus: 'STOPPED' | 'ERROR' = 'STOPPED'): Promise<void> => {
     isRunningRef.current = false;
     if (pollTimerRef.current) {
       clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
     }
-    setField('status', 'STOPPED');
+    // Reset the consecutive-error streak so a subsequent Start does not
+    // inherit the previous session's failure count.
+    consecutiveErrorsRef.current = 0;
+    setField('status', finalStatus);
     // Cancel anything we still have open so the user isn't left with
     // dangling resting orders after a stop.
     const open = [...managedRef.current.values()];
@@ -552,13 +638,13 @@ export const MarketMakerBot: React.FC = () => {
       try {
         await batchCancelOrders(open.map((o) => o.orderID ?? o.clOrdID), mm.symbol, 'spot');
         bumpField('ordersCancelled', open.length);
-        pushLog('cancel', `Stopped — cancelled ${open.length} resting order(s)`);
+        pushLog('cancel', `${finalStatus === 'ERROR' ? 'Error stop' : 'Stopped'} — cancelled ${open.length} resting order(s)`);
       } catch (err) {
         pushLog('error', `Stop cancel failed: ${getErrorMessage(err)}`);
       }
       managedRef.current.clear();
     } else {
-      pushLog('info', 'Bot stopped');
+      pushLog('info', finalStatus === 'ERROR' ? 'Bot halted (ERROR)' : 'Bot stopped');
     }
   }, [mm.symbol, setField, bumpField, pushLog]);
 
@@ -588,6 +674,12 @@ export const MarketMakerBot: React.FC = () => {
     sessionIdRef.current = Math.random().toString(36).slice(2, 8);
     seqRef.current = 0;
     managedRef.current.clear();
+    // Fresh session → clean failure streak. Without this the counter
+    // inherits state from the previous session and a user who
+    // explicitly restarts after hitting ERROR would see immediate
+    // auto-stop on the first blip.
+    consecutiveErrorsRef.current = 0;
+    lastCancelAtRef.current = 0;
 
     setField('status', 'RUNNING');
     setField('sessionStartedAt', nowMs());
