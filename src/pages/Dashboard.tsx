@@ -65,24 +65,25 @@ export const Dashboard: React.FC = () => {
   const tickers = liveTickers.length > 0 ? liveTickers : rawTickers;
 
   const loadData = useCallback(async () => {
-    // In demo mode `fetchTickers / fetchBalances / fetchPositions` are all
-    // routed to `demoEngine`, so the same code path works for both modes.
-    // We just gate the account calls on whether a private key (or demo
-    // engine) can provide account data.
     try {
-      const rawTickersRes = await fetchTickers('perps');
-      const tickersArr = Array.isArray(rawTickersRes) ? rawTickersRes : [];
-      const mapped: TickerRow[] = tickersArr
-        .filter((t: Record<string, unknown>) => t.symbol)
-        .map((t: Record<string, unknown>) => ({
-          symbol: String(t.symbol),
-          lastPrice: parseFloat(String(t.lastPrice ?? t.close ?? 0)),
-          change24h: parseFloat(String(t.priceChangePercent ?? t.change ?? 0)),
-          volume24h: parseFloat(String(t.quoteVolume ?? t.volume ?? 0)),
-        }))
-        .sort((a: TickerRow, b: TickerRow) => b.volume24h - a.volume24h)
-        .slice(0, 20);
-      setRawTickers(mapped);
+      // In demo mode useLiveTicker already feeds Market Overview from the
+      // demo engine subscription — skip fetchTickers to avoid flicker from
+      // a competing state update.
+      if (!isDemoMode) {
+        const rawTickersRes = await fetchTickers('perps');
+        const tickersArr = Array.isArray(rawTickersRes) ? rawTickersRes : [];
+        const mapped: TickerRow[] = tickersArr
+          .filter((t: Record<string, unknown>) => t.symbol)
+          .map((t: Record<string, unknown>) => ({
+            symbol: String(t.symbol),
+            lastPrice: parseFloat(String(t.lastPrice ?? t.close ?? 0)),
+            change24h: parseFloat(String(t.priceChangePercent ?? t.change ?? 0)),
+            volume24h: parseFloat(String(t.quoteVolume ?? t.volume ?? 0)),
+          }))
+          .sort((a: TickerRow, b: TickerRow) => b.volume24h - a.volume24h)
+          .slice(0, 20);
+        setRawTickers(mapped);
+      }
 
       if (hasKeys || isDemoMode) {
         const [rawBalances, rawPositions, rawPrices] = await Promise.all([
@@ -130,7 +131,7 @@ export const Dashboard: React.FC = () => {
     // Poll for fresh balance / position / PnL data. Demo engine updates
     // tick-by-tick, so we re-read more frequently when mocked so the UI feels
     // snappy without flooding a live API.
-    const timer = globalThis.setInterval(loadData, isDemoMode ? 3_000 : 15_000);
+    const timer = globalThis.setInterval(loadData, isDemoMode ? 10_000 : 15_000);
     return () => clearInterval(timer);
   }, [loadData, isDemoMode]);
 
@@ -228,19 +229,19 @@ export const Dashboard: React.FC = () => {
 
       {/* AI Strategy Orchestrator — "Today's Setup" recommendation */}
       {recommendation && (
-        <Card className="p-4 border-2 border-fuchsia-500/30 bg-gradient-to-br from-fuchsia-500/5 via-violet-500/3 to-cyan-500/5 shrink-0">
+        <Card className="p-4 border border-primary/20 bg-primary/5 shrink-0">
           <div className="flex items-start gap-4 flex-wrap">
             {/* Brand block */}
             <div className="flex items-center gap-3 min-w-[200px]">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-fuchsia-500/30 via-violet-500/25 to-cyan-400/30 border border-fuchsia-400/40 shadow-[0_0_12px_rgba(217,70,239,0.35)] flex items-center justify-center">
-                <Sparkles size={18} className="text-fuchsia-200 drop-shadow-[0_0_4px_rgba(217,70,239,0.8)]" />
+              <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center">
+                <Sparkles size={16} className="text-primary" />
               </div>
               <div>
-                <div className="text-[10px] uppercase tracking-widest font-bold bg-gradient-to-r from-fuchsia-300 via-violet-300 to-cyan-300 bg-clip-text text-transparent">
+                <div className="text-[10px] uppercase tracking-widest font-semibold text-primary">
                   AI Strategy Setup
                 </div>
                 <div className="text-xs text-text-muted mt-0.5">
-                  Today’s recommended bot
+                  Today's recommended bot
                 </div>
               </div>
             </div>
@@ -255,13 +256,13 @@ export const Dashboard: React.FC = () => {
               </div>
               <div className="flex flex-col items-start min-w-[140px]">
                 <span className="text-[9px] text-text-muted uppercase tracking-widest">Best fit</span>
-                <span className="text-sm font-bold text-fuchsia-300 mt-0.5">
+                <span className="text-sm font-bold text-primary mt-0.5">
                   {botLabel(recommendation.rec.bot)}
                 </span>
               </div>
               <div className="flex flex-col items-start min-w-[80px]">
                 <span className="text-[9px] text-text-muted uppercase tracking-widest">Confidence</span>
-                <span className="text-sm font-bold font-mono text-cyan-300 mt-0.5">
+                <span className="text-sm font-bold font-mono text-text-primary mt-0.5">
                   {recommendation.rec.confidence}%
                 </span>
               </div>
@@ -271,11 +272,8 @@ export const Dashboard: React.FC = () => {
             <Link
               to={recommendation.link}
               className={cn(
-                'inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold',
-                'bg-gradient-to-r from-fuchsia-500 to-violet-500 text-white',
-                'hover:from-fuchsia-400 hover:to-violet-400',
-                'shadow-[0_0_15px_rgba(217,70,239,0.4)]',
-                'transition-all duration-200 hover:shadow-[0_0_20px_rgba(217,70,239,0.6)]',
+                'inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-semibold',
+                'bg-primary text-white hover:opacity-90 transition-opacity',
               )}
             >
               <Zap size={14} />
@@ -284,7 +282,7 @@ export const Dashboard: React.FC = () => {
           </div>
 
           {/* Rationale */}
-          <p className="mt-3 pt-3 border-t border-fuchsia-500/20 text-[12px] text-text-secondary leading-relaxed italic">
+          <p className="mt-3 pt-3 border-t border-border text-[12px] text-text-secondary leading-relaxed italic">
             &quot;{recommendation.rec.rationale}&quot;
           </p>
 
@@ -331,7 +329,7 @@ export const Dashboard: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-border/50">
-              {loading ? (
+              {loading && tickers.length === 0 ? (
                 <tr>
                   <td colSpan={4} className="px-5 py-12 text-center">
                     <div className="flex flex-col items-center gap-3 text-text-muted">
