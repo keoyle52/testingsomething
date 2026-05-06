@@ -12,6 +12,7 @@ import {
   cancelAllOrders,
   fetchBookTickers,
   fetchOpenOrders,
+  fetchOrderStatus,
   normalizeSymbol,
   updatePerpsLeverage,
   getPerpsSymbolMeta,
@@ -44,6 +45,10 @@ interface LogEntry {
 
 const POLL_INTERVAL = 10_000;
 const ROUND_TRIP_FEE_PCT = 0.08; // approximate combined taker fee — used for the profit-per-grid sanity hint
+// Consecutive reconcile failures that flip the bot into ERROR + auto-stop.
+// 4 × 10s poll = 40s of hard failing before giving up, which absorbs brief
+// network blips while still surfacing auth / permission failures fast.
+const MAX_CONSECUTIVE_ERRORS = 4;
 
 /**
  * Compute grid level prices for either arithmetic (constant absolute step)
@@ -101,6 +106,14 @@ export const GridBot: React.FC = () => {
   const runningRef = useRef(false);
   const armedRef = useRef(false);
   const gridLevelsRef = useRef<GridLevel[]>([]);
+  // Re-entrancy guard for the poll loop — a slow reconcile (many missing
+  // order status round-trips) can take longer than POLL_INTERVAL, and two
+  // overlapping ticks observing the same "missing" levels would double-
+  // count every fill. The guard drops the second call cleanly.
+  const pollBusyRef = useRef(false);
+  // Consecutive reconcile failures. Reset on every clean tick; when it
+  // hits MAX_CONSECUTIVE_ERRORS the bot auto-stops into ERROR state.
+  const consecutiveErrorsRef = useRef(0);
   const [gridLevels, setGridLevels] = useState<GridLevel[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -210,6 +223,11 @@ export const GridBot: React.FC = () => {
 
   const pollOrders = useCallback(async () => {
     if (!runningRef.current) return;
+    // Re-entrancy guard: skip this tick if the previous is still in
+    // flight. Prevents double-counting fills if the per-missing-order
+    // fetchOrderStatus round-trips spill over POLL_INTERVAL.
+    if (pollBusyRef.current) return;
+    pollBusyRef.current = true;
     const { gridBot: s } = useBotStore.getState();
     const market: 'spot' | 'perps' = s.isSpot ? 'spot' : 'perps';
 
@@ -251,50 +269,95 @@ export const GridBot: React.FC = () => {
       );
 
       const levels = gridLevelsRef.current;
-      // Pre-compute neighbour gaps for arbitrary spacing (geometric grids
-      // have non-uniform absolute steps so a single `gridStep` is wrong).
 
+      // First pass: collect every level that appears to have left the
+      // book. We DO NOT mark them as FILLED yet — first we verify each
+      // one against /trades because an order missing from openOrders
+      // could also have been cancelled by the exchange (rate-limit,
+      // insufficient margin, risk check) and counting those as fills
+      // would bleed fake PnL into the stats.
+      const missingIndices: number[] = [];
       for (let i = 0; i < levels.length; i++) {
         const level = levels[i];
-        if (
-          level.status === 'ACTIVE' &&
-          level.orderId &&
-          !openOrderIds.has(level.orderId)
-        ) {
+        if (level.status === 'ACTIVE' && level.orderId && !openOrderIds.has(level.orderId)) {
+          missingIndices.push(i);
+        }
+      }
+
+      if (missingIndices.length > 0) {
+        // Verify each missing order concurrently. fetchOrderStatus
+        // returns:
+        //   - FILLED + filledQty > 0 → real fill, use reported numbers
+        //   - EXPIRED (or filledQty 0) → cancelled by exchange, not a fill
+        //   - null → /trades unreachable; fall back to optimistic fill
+        const verifications = await Promise.all(missingIndices.map(async (i) => {
+          const lvl = levels[i];
+          try {
+            const status = await fetchOrderStatus(lvl.orderId!, s.symbol, market);
+            return { idx: i, status };
+          } catch {
+            return { idx: i, status: null };
+          }
+        }));
+
+        for (const { idx, status } of verifications) {
+          const level = levels[idx];
           const filledSide = level.side!;
-          level.status = 'FILLED';
-          level.orderId = undefined;
+          const isCancelled = status ? status.status === 'EXPIRED' : false;
+
+          if (isCancelled) {
+            // Exchange cancelled the rung — do not count as a fill. Leave
+            // the slot empty for the next tick to re-place if conditions
+            // still call for it.
+            addLog({
+              message: `${filledSide} LIMIT @ ${level.price.toFixed(2)} cancelled by exchange (no fills) — slot empty`,
+              side: filledSide,
+            });
+            levels[idx] = { ...level, status: 'EMPTY', orderId: undefined, side: undefined };
+            continue;
+          }
+
+          // FILLED (verified) or UNVERIFIED (fallback). Either way we
+          // treat it as filled and advance the grid.
+          levels[idx] = { ...level, status: 'FILLED', orderId: undefined };
+
+          // Profit per fill = absolute distance to the neighbour rung ×
+          // qty. Works for both arithmetic and geometric spacing.
+          const neighbourPrice =
+            filledSide === 'BUY'  && idx + 1 < levels.length ? levels[idx + 1].price :
+            filledSide === 'SELL' && idx - 1 >= 0           ? levels[idx - 1].price :
+            level.price;
+          // Prefer the real filled quantity + value when we have them,
+          // so a partial fill at the boundary doesn't over-credit PnL.
+          const realQty = status && status.filledQty > 0 ? status.filledQty : parseFloat(s.amountPerGrid);
+          const pnlPerGrid = Math.abs(neighbourPrice - level.price) * realQty;
 
           addLog({
-            message: `${filledSide} LIMIT @ ${level.price.toFixed(2)} FILLED ✓`,
+            message: `${filledSide} LIMIT @ ${level.price.toFixed(2)} FILLED ${status && status.status === 'FILLED' ? '✓' : '(unverified)'} — qty ${realQty.toFixed(6)}, PnL +$${pnlPerGrid.toFixed(2)}`,
             side: filledSide,
           });
 
-          // Profit per fill = absolute distance to the neighbour rung × qty.
-          // Works for both arithmetic and geometric spacing.
-          const neighbourPrice =
-            filledSide === 'BUY'  && i + 1 < levels.length ? levels[i + 1].price :
-            filledSide === 'SELL' && i - 1 >= 0           ? levels[i - 1].price :
-            level.price;
-          const pnlPerGrid = Math.abs(neighbourPrice - level.price) * parseFloat(s.amountPerGrid);
-          const freshState = useBotStore.getState().gridBot;
-          freshState.setField('completedGrids', freshState.completedGrids + 1);
-          freshState.setField('realizedPnl', freshState.realizedPnl + pnlPerGrid);
+          // Atomic accumulation: multiple fills in the same tick must
+          // not stale-closure-overwrite each other.
+          useBotStore.getState().gridBot.bumpField('completedGrids', 1);
+          useBotStore.getState().gridBot.bumpField('realizedPnl', pnlPerGrid);
           useBotPnlStore.getState().recordTrade('grid', {
             pnlUsdt: pnlPerGrid,
             ts: Date.now(),
             note: `${filledSide} grid filled @ ${level.price.toFixed(2)}`,
           });
 
-          if (filledSide === 'BUY' && i + 1 < levels.length) {
-            const orderId = await placeGridOrder(levels[i + 1].price, 'SELL');
+          // Place the opposite-side replenishment order at the
+          // neighbouring rung.
+          if (filledSide === 'BUY' && idx + 1 < levels.length) {
+            const orderId = await placeGridOrder(levels[idx + 1].price, 'SELL');
             if (orderId) {
-              levels[i + 1] = { ...levels[i + 1], orderId, side: 'SELL', status: 'ACTIVE' };
+              levels[idx + 1] = { ...levels[idx + 1], orderId, side: 'SELL', status: 'ACTIVE' };
             }
-          } else if (filledSide === 'SELL' && i - 1 >= 0) {
-            const orderId = await placeGridOrder(levels[i - 1].price, 'BUY');
+          } else if (filledSide === 'SELL' && idx - 1 >= 0) {
+            const orderId = await placeGridOrder(levels[idx - 1].price, 'BUY');
             if (orderId) {
-              levels[i - 1] = { ...levels[i - 1], orderId, side: 'BUY', status: 'ACTIVE' };
+              levels[idx - 1] = { ...levels[idx - 1], orderId, side: 'BUY', status: 'ACTIVE' };
             }
           }
         }
@@ -305,9 +368,23 @@ export const GridBot: React.FC = () => {
 
       gridLevelsRef.current = [...levels];
       setGridLevels([...levels]);
+
+      // Clean tick — reset the failure streak.
+      consecutiveErrorsRef.current = 0;
     } catch (err: unknown) {
+      consecutiveErrorsRef.current += 1;
       const msg = getErrorMessage(err);
-      addLog({ message: `ERROR polling orders: ${msg}` });
+      addLog({
+        message: `ERROR polling orders (${consecutiveErrorsRef.current}/${MAX_CONSECUTIVE_ERRORS}): ${msg}`,
+      });
+      if (consecutiveErrorsRef.current >= MAX_CONSECUTIVE_ERRORS) {
+        addLog({
+          message: `Giving up after ${MAX_CONSECUTIVE_ERRORS} consecutive failures — auto-stopping into ERROR state.`,
+        });
+        void stopBotRef.current?.('ERROR — too many consecutive failures');
+      }
+    } finally {
+      pollBusyRef.current = false;
     }
   }, [addLog, placeGridOrder, fetchLastPrice]);
 
@@ -455,6 +532,8 @@ export const GridBot: React.FC = () => {
     setLogs([]);
     addLog({ message: 'Grid Bot starting…' });
     prevPriceForCrossRef.current = null;
+    consecutiveErrorsRef.current = 0;
+    pollBusyRef.current = false;
 
     const trigger = parseFloat(s.triggerPrice);
     if (Number.isFinite(trigger) && trigger > 0) {
@@ -474,6 +553,9 @@ export const GridBot: React.FC = () => {
     armedRef.current = false;
     if (pollRef.current)       { clearInterval(pollRef.current); pollRef.current = null; }
     if (armWatcherRef.current) { clearInterval(armWatcherRef.current); armWatcherRef.current = null; }
+    // Reset failure streak on every stop so a subsequent Start does not
+    // inherit leftover error counts from a previous fatal session.
+    consecutiveErrorsRef.current = 0;
 
     const { gridBot: s } = useBotStore.getState();
     const market: 'spot' | 'perps' = s.isSpot ? 'spot' : 'perps';
@@ -489,14 +571,18 @@ export const GridBot: React.FC = () => {
       toast.error(`Grid Bot: ${msg}`);
     }
 
-    s.setField('status', 'STOPPED');
+    // If we were stopped because of a failure streak, preserve the ERROR
+    // status so the badge stays red and the user sees intervention is
+    // required. Otherwise drop to STOPPED like a normal end-of-session.
+    const isErrorStop = typeof reason === 'string' && reason.startsWith('ERROR');
+    s.setField('status', isErrorStop ? 'ERROR' : 'STOPPED');
     s.setField('activeOrders', 0);
 
     gridLevelsRef.current = gridLevelsRef.current.map((l) => ({
       ...l, status: 'EMPTY' as const, orderId: undefined, side: undefined,
     }));
     setGridLevels([...gridLevelsRef.current]);
-    addLog({ message: 'Grid Bot stopped' });
+    addLog({ message: isErrorStop ? 'Grid Bot halted (ERROR)' : 'Grid Bot stopped' });
   }, [addLog]);
 
   // Wire the ref so pollOrders / armWatcher can call the latest stopBot.

@@ -45,6 +45,12 @@ function getOrderId(order: TargetOrder): string {
 }
 
 const POLL_INTERVAL = 5000;
+// After this many consecutive polling failures the Copy Trader auto-stops
+// into ERROR state. Covers ~25s of hard failures at the 5s poll cadence,
+// long enough to absorb brief network blips but short enough that the
+// user notices promptly if the target-account endpoint goes down or auth
+// fails.
+const MAX_CONSECUTIVE_POLL_ERRORS = 5;
 
 export const CopyTrader: React.FC = () => {
   const { confirmOrders } = useSettingsStore();
@@ -67,6 +73,10 @@ export const CopyTrader: React.FC = () => {
   const knownOrderIdsRef = useRef<Set<string>>(new Set());
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isRunningRef = useRef(false);
+  // Consecutive per-market polling failures, summed across markets in
+  // a single tick. Reset on any successful poll. Hits
+  // MAX_CONSECUTIVE_POLL_ERRORS → auto-stop into ERROR.
+  const consecutivePollErrorsRef = useRef(0);
 
   const addLog = useCallback((log: CopyLog) => {
     setCopyLogs((prev) => [log, ...prev].slice(0, 200));
@@ -126,6 +136,10 @@ export const CopyTrader: React.FC = () => {
     [copyRatio, maxSize, delay, addLog],
   );
 
+  // Forward ref so pollOrders can call the latest stopBot without a
+  // circular useCallback dependency chain.
+  const stopBotRef = useRef<(() => void) | null>(null);
+
   const pollOrders = useCallback(
     async (market: 'spot' | 'perps') => {
       try {
@@ -158,9 +172,28 @@ export const CopyTrader: React.FC = () => {
             await copyOrder(order, market);
           }
         }
+
+        // Successful poll — clear the failure streak. If ANY market
+        // succeeds this tick the streak resets, which is the right
+        // policy for BOTH mode (one transient perps failure shouldn't
+        // auto-stop when spot is still giving us fresh signals).
+        consecutivePollErrorsRef.current = 0;
       } catch (err: unknown) {
+        consecutivePollErrorsRef.current += 1;
         const errorMsg = err instanceof Error ? err.message : 'Polling error';
-        toast.error(`Target tracking error (${market}): ${errorMsg}`);
+        toast.error(
+          `Target tracking error (${market}) [${consecutivePollErrorsRef.current}/${MAX_CONSECUTIVE_POLL_ERRORS}]: ${errorMsg}`,
+        );
+        if (consecutivePollErrorsRef.current >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          toast.error(`Copy Trader auto-stopped after ${MAX_CONSECUTIVE_POLL_ERRORS} consecutive failures`);
+          setStatus('ERROR');
+          isRunningRef.current = false;
+          if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+          // Defer the rest of the teardown through the ref so we don't
+          // double-fire it from here if multiple markets report errors
+          // on the same tick.
+          stopBotRef.current?.();
+        }
       }
     },
     [targetAddress, copyOrder],
@@ -196,6 +229,9 @@ export const CopyTrader: React.FC = () => {
     setCopyLogs([]);
     setSuccessCount(0);
     setTotalAttempts(0);
+    // Clear failure streak inherited from a previous ERROR-stopped
+    // session so the very first poll is not unfairly penalised.
+    consecutivePollErrorsRef.current = 0;
     isRunningRef.current = true;
     setStatus('RUNNING');
     toast.success('Copy Trader started.');
@@ -240,9 +276,15 @@ export const CopyTrader: React.FC = () => {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
-    setStatus('STOPPED');
+    consecutivePollErrorsRef.current = 0;
+    // If we're already in ERROR (auto-stopped from pollOrders), keep
+    // the badge red so the user notices intervention is required.
+    setStatus((prev) => (prev === 'ERROR' ? 'ERROR' : 'STOPPED'));
     toast('Copy Trader stopped.', { icon: '⏹️' });
   }, []);
+
+  // Wire the ref so pollOrders can call the latest stopBot.
+  useEffect(() => { stopBotRef.current = stopBot; }, [stopBot]);
 
   useEffect(() => {
     return () => {

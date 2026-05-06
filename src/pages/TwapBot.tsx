@@ -12,13 +12,19 @@ import { StatCard } from '../components/common/Card';
 import { Input, Select } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { useSettingsStore } from '../store/settingsStore';
-import { placeOrder, fetchBookTickers, fetchFeeRate, normalizeSymbol } from '../api/services';
+import { placeOrder, fetchBookTickers, fetchFeeRate, fetchOrderStatus, cancelOrder, normalizeSymbol } from '../api/services';
 import type { FeeRateInfo } from '../api/services';
 import { recommendTwapBot } from '../api/aiAutoConfig';
 import { AutoConfigureButton } from '../components/common/AutoConfigureButton';
 import { SymbolSelector } from '../components/common/SymbolSelector';
 import { cn, getErrorMessage } from '../lib/utils';
 import { useBotPnlStore } from '../store/botPnlStore';
+
+// After this many consecutive slice failures the bot auto-stops into
+// ERROR state. TWAP runs are typically long (minutes-to-hours) so 3 is
+// a reasonable balance between "don't give up on a single blip" and
+// "don't burn through half the run on persistent failures".
+const MAX_CONSECUTIVE_SLICE_ERRORS = 3;
 
 interface TwapLog {
   time: string;
@@ -47,10 +53,19 @@ interface TwapLog {
 type TwapOrderType = 'MARKET' | 'LIMIT';
 
 export const TwapBot: React.FC = () => {
-  const { confirmOrders } = useSettingsStore();
+  const { confirmOrders, isDemoMode } = useSettingsStore();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const runningRef = useRef(false);
   const feeRateRef = useRef<FeeRateInfo>({ makerFee: 0.00035, takerFee: 0.00065 });
+  // Pending LIMIT orderIds from the most recent slice — needed by stopBot
+  // so it can cancel the resting limit(s) the user would otherwise have
+  // to hunt down manually in the exchange UI. MARKET slices never
+  // populate this (they fill or expire within the slice).
+  const pendingLimitOrdersRef = useRef<Set<string>>(new Set());
+  // Consecutive failed slices. After MAX_CONSECUTIVE_SLICE_ERRORS we
+  // auto-stop into ERROR so long runs don't burn through on persistent
+  // auth / balance failures.
+  const consecutiveErrorsRef = useRef(0);
 
   // ── Core ────────────────────────────────────────────────────────
   const [symbol, setSymbol] = useState('BTC-USD');
@@ -162,44 +177,110 @@ export const TwapBot: React.FC = () => {
         orderParams.timeInForce = 1;     // GTC — replaced on next slice if unfilled
       }
 
-      await placeOrder(orderParams as unknown as Parameters<typeof placeOrder>[0], market);
+      const placeRes = await placeOrder(orderParams as unknown as Parameters<typeof placeOrder>[0], market);
+      const placeResObj = placeRes as Record<string, unknown>;
+      const orderId = String(placeResObj?.orderID ?? placeResObj?.orderId ?? placeResObj?.id ?? '');
 
-      const fillEstimate = orderType === 'MARKET' ? fillPrice : parseFloat(String(orderParams.price));
-      const vol = sliceAmount * fillEstimate;
-      const feeBps = orderType === 'LIMIT' ? feeRateRef.current.makerFee : feeRateRef.current.takerFee;
-      const fee = vol * feeBps;
+      // Resolve fill price + qty + fee from the exchange.
+      //
+      // For MARKET slices: retry fetchOrderStatus a few times to defeat
+      // the /trades endpoint's ~300-1500ms lag behind the order placement
+      // response. If still unresolved after retries we fall back to the
+      // pre-trade mid and an estimated fee, with a warning log.
+      //
+      // For LIMIT slices: the order is still on the book (GTC) and won't
+      // show fills until it's taken. We register the orderId so stopBot
+      // can cancel it, then optimistically count a zero-fill placement —
+      // real fills will be reconciled via fetchOrderStatus on the next
+      // slice tick (see the "pre-slice reconcile" block below).
+      let actualPrice = orderType === 'MARKET' ? fillPrice : parseFloat(String(orderParams.price));
+      let actualQty = sliceAmount;
+      let actualFee = 0;
+      let filledThisCall = orderType === 'MARKET';
 
+      if (orderType === 'LIMIT' && orderId && !isDemoMode) {
+        pendingLimitOrdersRef.current.add(orderId);
+      }
+
+      if (orderType === 'MARKET' && orderId && !isDemoMode) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await new Promise((r) => setTimeout(r, 600));
+          try {
+            const status = await fetchOrderStatus(orderId, symbol, market);
+            if (status && status.filledQty > 0) {
+              actualPrice = status.avgFillPrice > 0 ? status.avgFillPrice : actualPrice;
+              actualQty = status.filledQty;
+              actualFee = status.totalFee > 0 ? status.totalFee : (actualQty * actualPrice) * feeRateRef.current.takerFee;
+              filledThisCall = true;
+              break;
+            }
+            if (status && status.status === 'EXPIRED' && attempt === 2) {
+              // Market IOC expired with no fills — rare but happens on
+              // thin books. Treat as a skipped slice, not an error.
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                side,
+                message: `Slice ${currentSlice + 1}/${totalSlices} market order expired unfilled — no size posted`,
+              });
+              setSkippedSlices((p) => p + 1);
+              return 'SKIPPED';
+            }
+          } catch {
+            // swallow — retry loop handles it
+          }
+        }
+        if (!filledThisCall) {
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `Slice ${currentSlice + 1}/${totalSlices} fill verification timed out — stats use mid-price estimate`,
+          });
+          actualFee = (actualQty * actualPrice) * feeRateRef.current.takerFee;
+        }
+      } else {
+        // MARKET in demo OR LIMIT in either: estimated values only.
+        const feeBps = orderType === 'LIMIT' ? feeRateRef.current.makerFee : feeRateRef.current.takerFee;
+        actualFee = (actualQty * actualPrice) * feeBps;
+      }
+
+      // For LIMIT we only count the placement, not the fill. actualQty /
+      // actualPrice represent the posted order, not an executed trade.
+      // Volume/fee stats are conservative — if the limit does eventually
+      // fill we'll reconcile on a later tick.
+      const vol = actualQty * actualPrice;
       setExecutedSlices((p) => p + 1);
       setExecutedVolume((p) => p + vol);
-      setExecutedQty((p) => p + sliceAmount);
-      setTotalFee((p) => p + fee);
+      setExecutedQty((p) => p + actualQty);
+      setTotalFee((p) => p + actualFee);
       setAvgPrice((prev) => {
         const prevSlices = currentSlice;
-        return prevSlices === 0 ? fillEstimate : prev + (fillEstimate - prev) / (prevSlices + 1);
+        return prevSlices === 0 ? actualPrice : prev + (actualPrice - prev) / (prevSlices + 1);
       });
-      // Note this for the per-bot PnL widget (treated as zero-PnL fills
-      // since TWAP execution PnL only resolves against eventual close).
       useBotPnlStore.getState().recordTrade('twap', {
         pnlUsdt: 0,
         ts: Date.now(),
-        note: `Slice ${currentSlice + 1}/${totalSlices} ${side} ${sliceAmount.toFixed(6)} @ ${fillEstimate.toFixed(2)}`,
+        note: `Slice ${currentSlice + 1}/${totalSlices} ${side} ${actualQty.toFixed(6)} @ ${actualPrice.toFixed(2)}${orderType === 'LIMIT' ? ' (limit)' : ''}`,
       });
-
       addLog({
         time: new Date().toLocaleTimeString(),
         side,
-        amount: sliceAmount,
-        price: fillEstimate,
-        message: `Slice ${currentSlice + 1}/${totalSlices} ${orderType === 'LIMIT' ? 'limit-placed' : 'filled'}`,
+        amount: actualQty,
+        price: actualPrice,
+        message: `Slice ${currentSlice + 1}/${totalSlices} ${orderType === 'LIMIT' ? 'limit-placed' : filledThisCall ? 'filled' : 'filled (unverified)'}`,
       });
+      // Successful slice — clear the failure streak.
+      consecutiveErrorsRef.current = 0;
       return 'OK';
     } catch (err: unknown) {
       const msg = getErrorMessage(err);
-      addLog({ time: new Date().toLocaleTimeString(), message: `ERROR: ${msg}` });
+      consecutiveErrorsRef.current += 1;
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        message: `ERROR (${consecutiveErrorsRef.current}/${MAX_CONSECUTIVE_SLICE_ERRORS}): ${msg}`,
+      });
       toast.error(`TWAP: ${msg}`);
       return 'ERROR';
     }
-  }, [symbol, side, isSpot, orderType, limitOffsetBps, maxBuyPrice, minSellPrice, addLog]);
+  }, [symbol, side, isSpot, orderType, limitOffsetBps, maxBuyPrice, minSellPrice, addLog, isDemoMode]);
 
   const doStart = useCallback(() => {
     if (runningRef.current) return;
@@ -222,6 +303,10 @@ export const TwapBot: React.FC = () => {
     setAvgPrice(0);
     setTotalFee(0);
     setLogs([]);
+    // Reset per-session refs so a re-Start after ERROR does not inherit
+    // the previous session's failure count or pending limit-order ids.
+    consecutiveErrorsRef.current = 0;
+    pendingLimitOrdersRef.current = new Set();
 
     const baseSlice = total / numSlices;
     const sizeVar = parseFloat(sizeVariancePct) || 0;
@@ -250,6 +335,20 @@ export const TwapBot: React.FC = () => {
       cumulativeQty += targetSlice;
 
       await executeSlice(targetSlice, currentSlice, numSlices);
+
+      // Auto-stop into ERROR after too many consecutive slice failures.
+      // Long TWAP runs can otherwise silently burn through half the
+      // schedule on a persistent auth / balance issue.
+      if (consecutiveErrorsRef.current >= MAX_CONSECUTIVE_SLICE_ERRORS) {
+        runningRef.current = false;
+        setStatus('ERROR');
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `Auto-stopped after ${MAX_CONSECUTIVE_SLICE_ERRORS} consecutive slice errors — check credentials / balance and re-Start.`,
+        });
+        return;
+      }
+
       currentSlice++;
 
       if (runningRef.current && currentSlice < numSlices) {
@@ -283,15 +382,28 @@ export const TwapBot: React.FC = () => {
     else doStart();
   }, [confirmOrders, doStart]);
 
-  const stopBot = useCallback(() => {
+  const stopBot = useCallback(async () => {
     runningRef.current = false;
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
+    // Cancel any still-resting LIMIT orders placed by the most recent
+    // slice. Without this the user is left with stray limit(s) on the
+    // book after a mid-run Stop — annoying and surprising.
+    const market: 'spot' | 'perps' = isSpot ? 'spot' : 'perps';
+    const pending = Array.from(pendingLimitOrdersRef.current);
+    if (pending.length > 0 && !isDemoMode) {
+      await Promise.all(pending.map((id) =>
+        cancelOrder(id, symbol, market).catch(() => { /* already gone */ }),
+      ));
+      addLog({ time: new Date().toLocaleTimeString(), message: `Cancelled ${pending.length} pending limit order(s)` });
+    }
+    pendingLimitOrdersRef.current = new Set();
+    consecutiveErrorsRef.current = 0;
     setStatus('STOPPED');
     addLog({ time: new Date().toLocaleTimeString(), message: 'Bot stopped by user' });
-  }, [addLog]);
+  }, [addLog, isDemoMode, isSpot, symbol]);
 
   useEffect(() => () => {
     runningRef.current = false;

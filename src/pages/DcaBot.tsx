@@ -12,7 +12,7 @@ import { StatCard } from '../components/common/Card';
 import { Input, Select } from '../components/common/Input';
 import { Button } from '../components/common/Button';
 import { useSettingsStore } from '../store/settingsStore';
-import { placeOrder, fetchBookTickers, normalizeSymbol } from '../api/services';
+import { placeOrder, fetchBookTickers, fetchOrderStatus, normalizeSymbol } from '../api/services';
 import { recommendDcaBot } from '../api/aiAutoConfig';
 import { AutoConfigureButton } from '../components/common/AutoConfigureButton';
 import { SymbolSelector } from '../components/common/SymbolSelector';
@@ -47,10 +47,22 @@ interface DcaLog {
  */
 type DcaCondition = 'NONE' | 'BUY_THE_DIP';
 
+// DCA runs are typically long (hours-to-days) so we use a slightly
+// higher threshold than TWAP. 3 consecutive failures = 3 × the user's
+// chosen interval of no successful orders — plenty of time to surface
+// intermittent issues without burning through the whole schedule on a
+// persistent auth / balance problem.
+const MAX_CONSECUTIVE_ORDER_ERRORS = 3;
+
 export const DcaBot: React.FC = () => {
-  const { confirmOrders } = useSettingsStore();
+  const { confirmOrders, isDemoMode } = useSettingsStore();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const runningRef = useRef(false);
+  // Consecutive fatal order errors. Reset on every successful fill.
+  // When this hits MAX_CONSECUTIVE_ORDER_ERRORS we auto-stop the bot
+  // into ERROR state and DO NOT call scheduleNext, so the schedule
+  // does not keep firing against a persistent failure.
+  const consecutiveErrorsRef = useRef(0);
 
   // ── Core ────────────────────────────────────────────────────────
   const [symbol, setSymbol] = useState('BTC-USD');
@@ -177,49 +189,115 @@ export const DcaBot: React.FC = () => {
       }
 
       // ── Place market order ──
-      await placeOrder(
+      const placeRes = await placeOrder(
         { symbol, side: sideNum as 1 | 2, type: 2, quantity: amount.toFixed(8) },
         market,
       );
-      const vol = amount * prices.fill;
-      lastFillPriceRef.current = prices.fill;
+      const placeResObj = placeRes as Record<string, unknown>;
+      const orderId = String(placeResObj?.orderID ?? placeResObj?.orderId ?? placeResObj?.id ?? '');
 
-      const newCount = executedOrders + 1;
-      setExecutedOrders(newCount);
+      // Resolve the REAL fill price + qty via fetchOrderStatus — same
+      // retry pattern as SignalBot / TwapBot because /trades lags the
+      // placement response by ~300-1500ms on testnet. Fall back to the
+      // pre-trade best-offer price if the retries time out; log so the
+      // user knows this tick's avgPrice is an estimate.
+      let actualPrice = prices.fill;
+      let actualQty = amount;
+      if (orderId && !isDemoMode) {
+        let resolved = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await new Promise((r) => setTimeout(r, 600));
+          try {
+            const status = await fetchOrderStatus(orderId, symbol, market);
+            if (status && status.filledQty > 0) {
+              actualPrice = status.avgFillPrice > 0 ? status.avgFillPrice : actualPrice;
+              actualQty = status.filledQty;
+              resolved = true;
+              break;
+            }
+            if (status && status.status === 'EXPIRED' && attempt === 2) {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `DCA order ${orderId} expired unfilled — skipping this tick`,
+              });
+              setSkippedOrders((p) => p + 1);
+              return;
+            }
+          } catch {
+            // swallow — retry loop handles it
+          }
+        }
+        if (!resolved) {
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `Fill verification timed out — avg price uses mid ${actualPrice.toFixed(2)}`,
+          });
+        }
+      }
+
+      const vol = actualQty * actualPrice;
+      lastFillPriceRef.current = actualPrice;
+      // Successful fill — clear the failure streak.
+      consecutiveErrorsRef.current = 0;
+
+      // Use functional setters across the board so multiple rapid ticks
+      // (e.g. the user shortens intervalSec to 1s) never overwrite each
+      // other's increments via stale closures.
+      setExecutedOrders((prev) => {
+        const newCount = prev + 1;
+        // Running average using the fresh count.
+        setAvgPrice((prevAvg) => prevAvg === 0 ? actualPrice : prevAvg + (actualPrice - prevAvg) / newCount);
+        // Hard cap on order count — evaluated with the fresh count so
+        // max-orders never overshoots by one due to stale-closure reads.
+        const maxOrd = parseInt(maxOrders);
+        if (Number.isFinite(maxOrd) && maxOrd > 0 && newCount >= maxOrd) {
+          // Defer the stop so we don't mutate runningRef inside a setter.
+          queueMicrotask(() => stopBot(`Max orders (${maxOrd}) reached`));
+        }
+        return newCount;
+      });
       setTotalInvested((p) => p + vol);
-      setTotalQty((p) => p + amount);
-      // Running average — guarded against the first-tick edge.
-      setAvgPrice((prev) => prev === 0 ? prices.fill : prev + (prices.fill - prev) / newCount);
+      setTotalQty((p) => p + actualQty);
       useBotPnlStore.getState().recordTrade('dca', {
         pnlUsdt: 0,
         ts: Date.now(),
-        note: `${side} ${amount.toFixed(6)} @ ${prices.fill.toFixed(2)}`,
+        note: `${side} ${actualQty.toFixed(6)} @ ${actualPrice.toFixed(2)}`,
       });
 
       addLog({
         time: new Date().toLocaleTimeString(),
         side,
-        amount,
-        price: prices.fill,
+        amount: actualQty,
+        price: actualPrice,
         message: condition === 'BUY_THE_DIP' ? 'Dip buy executed' : 'DCA order executed',
       });
-
-      // Hard cap on order count.
-      const maxOrd = parseInt(maxOrders);
-      if (Number.isFinite(maxOrd) && maxOrd > 0 && newCount >= maxOrd) {
-        stopBot(`Max orders (${maxOrd}) reached`);
-        return;
-      }
     } catch (err: unknown) {
       const msg = getErrorMessage(err);
-      addLog({ time: new Date().toLocaleTimeString(), message: `ERROR: ${msg}` });
+      consecutiveErrorsRef.current += 1;
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        message: `ERROR (${consecutiveErrorsRef.current}/${MAX_CONSECUTIVE_ORDER_ERRORS}): ${msg}`,
+      });
       toast.error(`DCA: ${msg}`);
+      // Hard-fail: flip to ERROR status and stop the schedule entirely.
+      // The previous implementation kept queuing new ticks against a
+      // persistent failure (e.g. expired auth), silently wasting the
+      // user's entire DCA schedule.
+      if (consecutiveErrorsRef.current >= MAX_CONSECUTIVE_ORDER_ERRORS) {
+        runningRef.current = false;
+        if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+        setStatus('ERROR');
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `Auto-stopped after ${MAX_CONSECUTIVE_ORDER_ERRORS} consecutive failures — check credentials / balance and re-Start.`,
+        });
+      }
     }
   }, [
     isSpot, symbol, side, amountPerOrder,
     takeProfitPrice, stopLossPrice, takeProfitPct,
-    avgPrice, condition, dipPercent, executedOrders,
-    maxOrders, addLog, fetchPrices, stopBot,
+    avgPrice, condition, dipPercent,
+    maxOrders, addLog, fetchPrices, stopBot, isDemoMode,
   ]);
 
   const scheduleNextRef = useRef<() => void>(() => {});
@@ -246,6 +324,9 @@ export const DcaBot: React.FC = () => {
     setCurrentPrice(0);
     setLogs([]);
     lastFillPriceRef.current = null;
+    // Clear any failure streak inherited from a previous ERROR-stopped
+    // session so the first tick is not unfairly penalised.
+    consecutiveErrorsRef.current = 0;
 
     addLog({
       time: new Date().toLocaleTimeString(),

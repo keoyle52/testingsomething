@@ -39,6 +39,18 @@ interface GridBotState {
   completedGrids: number;
   realizedPnl: number;
   setField: <K extends keyof GridBotState>(field: K, value: GridBotState[K]) => void;
+  /**
+   * Atomically add `delta` to a numeric counter. Same rationale as
+   * `MarketMakerBotState.bumpField`: when multiple grid fills are
+   * detected in the same poll tick, each `setField('realizedPnl',
+   * state.realizedPnl + pnl)` would read a stale snapshot of
+   * `realizedPnl` from the closure and silently overwrite the previous
+   * call. Functional update reads the freshest store value.
+   */
+  bumpField: (
+    field: 'activeOrders' | 'totalInvestment' | 'completedGrids' | 'realizedPnl',
+    delta: number,
+  ) => void;
   resetStats: () => void;
 }
 
@@ -215,6 +227,13 @@ export const useBotStore = create<BotStoreState>((set) => ({
     setField: (field, value) =>
       set((state) => ({
         gridBot: { ...state.gridBot, [field]: value },
+      })),
+    bumpField: (field, delta) =>
+      set((state) => ({
+        gridBot: {
+          ...state.gridBot,
+          [field]: (state.gridBot[field] as number) + delta,
+        },
       })),
     resetStats: () =>
       set((state) => ({
