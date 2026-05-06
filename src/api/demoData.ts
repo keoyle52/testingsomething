@@ -66,10 +66,53 @@ export const DEMO_OPEN_ORDERS = [
   { orderId: 'demo-002', symbol: 'ETH-USD', side: 'SELL', type: 'LIMIT', price: 3_400,  quantity: 1.2,  status: 'OPEN' },
 ];
 
-// Simulated live price fluctuation — ±0.15% per tick
-export function getDemoLivePrice(basePrice: number): number {
-  const delta = basePrice * (Math.random() * 0.003 - 0.0015);
-  return parseFloat((basePrice + delta).toFixed(2));
+/**
+ * Per-tick price evolution for the demo engine.
+ *
+ * The previous version was a pure ±0.15% mean-zero random walk, which
+ * meant prices barely drifted over a session: with TICK_MS=1.2s, a 3%
+ * take-profit would take roughly 3-5 minutes to fire even when it
+ * "should" trigger, so the user never saw TP/SL paths exercised in demo.
+ *
+ * The new version layers a slow random-walking trend on top of the
+ * jitter. The trend bias is held in a closure-scoped map so successive
+ * ticks consistently push price in the same direction for ~30-60s
+ * before reversing — that's the regime the technical indicators are
+ * designed to detect, and it's the regime in which TP/SL fires
+ * predictably enough for a manual demo to feel responsive.
+ *
+ * Net behaviour at default 1.2s tick:
+ *   - Per-tick delta: ±0.20% (jitter) ± 0.10% (trend bias) ≈ ±0.30%
+ *   - 60s drift expectation: ~1.5% in the dominant direction
+ *   - Default TP=3% / SL=2% therefore fires in ~1-3 minutes of demo time
+ */
+const _trendBias = new Map<string, { dir: 1 | -1; until: number }>();
+
+export function getDemoLivePrice(basePrice: number, key?: string): number {
+  // Without a key we fall back to a stronger pure-jitter walk — used by
+  // legacy callers that don't have a stable identifier. Most callers
+  // pass the symbol, which is what we want.
+  if (!key) {
+    const delta = basePrice * (Math.random() * 0.004 - 0.002);
+    return parseFloat((basePrice + delta).toFixed(2));
+  }
+
+  const now = Date.now();
+  let bias = _trendBias.get(key);
+  if (!bias || bias.until <= now) {
+    // Pick a fresh trend direction lasting 30-60s. Random sign so
+    // sessions alternate between bullish and bearish stretches.
+    bias = {
+      dir: Math.random() < 0.5 ? 1 : -1,
+      until: now + 30_000 + Math.random() * 30_000,
+    };
+    _trendBias.set(key, bias);
+  }
+
+  // Trend pushes ~0.10% in the chosen direction; jitter is ±0.20%.
+  const trend = basePrice * 0.001 * bias.dir;
+  const jitterDelta = basePrice * (Math.random() * 0.004 - 0.002);
+  return parseFloat((basePrice + trend + jitterDelta).toFixed(2));
 }
 
 // Generate fake candle history for a symbol (last 60 candles, 1-min)

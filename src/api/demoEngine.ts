@@ -250,7 +250,10 @@ function tick(): void {
   const now = Date.now();
 
   for (const t of _state.tickers.values()) {
-    const newLast = getDemoLivePrice(t.lastPrice);
+    // Pass the symbol so each ticker keeps its own slow trend bias —
+    // otherwise every market would drift the same way every tick and
+    // the simulation would feel flat.
+    const newLast = getDemoLivePrice(t.lastPrice, t.symbol);
     t.lastPrice = newLast;
     t.markPrice = jitter(newLast, 0.0005);
     t.indexPrice = jitter(newLast, 0.0004);
@@ -577,9 +580,28 @@ export function getDemoOrderbook(symbol: string, _market: Market, limit = 20) {
 }
 
 /**
- * Generate a plausible kline series ending at the current demo price.
- * Uses random-walk increments seeded from the ticker so successive calls
- * with the same symbol/interval are close-but-not-identical.
+ * Generate a plausible kline series that ACTUALLY exercises the signal
+ * engine. The previous implementation was a pure ±0.6% random walk, which
+ * meant RSI(14) hovered in the 45–55 band, MACD histogram barely crossed
+ * zero, and EMA fast/slow stayed within a fraction of a percent of each
+ * other. Net result: every signal evaluator returned NEUTRAL forever and
+ * the user saw "no signals" both in demo mode and (by extension) believed
+ * the bot was broken in live mode too.
+ *
+ * The new generator overlays three components on top of the ticker's
+ * `lastPrice`:
+ *
+ *   1. **Trend wave** (long period, ~30 candles) — large amplitude
+ *      sinusoid that creates trendy stretches where EMAs cross.
+ *   2. **Oscillator wave** (short period, ~8 candles) — medium amplitude
+ *      sinusoid that pushes RSI(14) into the 25–75 range so oversold /
+ *      overbought triggers fire several times per 100-candle window.
+ *   3. **Random noise** (±0.4% per candle) — keeps the series looking
+ *      organic rather than mathematically perfect.
+ *
+ * Each symbol gets a stable phase derived from its ticker so different
+ * markets don't all signal in lock-step. Volume is also pumped at the
+ * extrema of the oscillator wave so the VOLUME_SPIKE signal can fire.
  */
 export function getDemoKlines(symbol: string, interval: string, limit = 100) {
   ensureInit();
@@ -595,16 +617,50 @@ export function getDemoKlines(symbol: string, interval: string, limit = 100) {
   const step = intervalMs[interval] ?? 3_600_000;
   const now = Date.now();
 
+  // Per-symbol stable phase so BTC, ETH, SOL klines look different but
+  // each call for the same symbol returns a similar shape.
+  const phase = symbolPhase(key);
+
+  // Tuned amplitudes — kept compact so the chart visual still looks like
+  // a normal market (single-digit % swings), but large enough that the
+  // overlaid signals push RSI into the 25–75 envelope.
+  const trendAmp = 0.045;       // ±4.5% — slow trend
+  const oscAmp = 0.018;         // ±1.8% — fast oscillator
+  const trendPeriod = 30;       // candles per cycle
+  const oscPeriod = 8;
+  const noiseAmp = 0.004;       // ±0.4% noise
+
+  const base = t.lastPrice;
   const klines: Record<string, unknown>[] = [];
-  let price = t.lastPrice * 0.97;
+  let prevClose = base;
+
   for (let i = limit - 1; i >= 0; i--) {
+    // `i` decreases as we move forward in time. Index from the FAR-END of
+    // the window so the LAST candle (i=0) lands close to the current
+    // ticker price.
+    const candleIdx = (limit - 1) - i;
     const openTs = now - i * step;
-    const o = price;
-    const change = price * (Math.random() * 0.012 - 0.006);
-    const c = Math.max(0.0001, price + change);
-    const h = Math.max(o, c) * (1 + Math.random() * 0.004);
-    const l = Math.min(o, c) * (1 - Math.random() * 0.004);
-    const v = Math.random() * 500 + 50;
+
+    const trend = Math.sin((candleIdx / trendPeriod) * 2 * Math.PI + phase) * trendAmp;
+    const osc   = Math.sin((candleIdx / oscPeriod)   * 2 * Math.PI + phase * 1.7) * oscAmp;
+    const noise = (Math.random() * 2 - 1) * noiseAmp;
+
+    const target = base * (1 + trend + osc + noise);
+    // Open from the previous close so the wick chain is continuous.
+    const o = prevClose;
+    const c = Math.max(0.0001, target);
+
+    // High/low extend slightly beyond the candle body. Bias depends on
+    // whether the candle is up or down so wicks look natural.
+    const wickAmp = base * 0.003 * (0.5 + Math.random());
+    const h = Math.max(o, c) + wickAmp * Math.random();
+    const l = Math.min(o, c) - wickAmp * Math.random();
+
+    // Volume amplified at oscillator extremes — a 1.8% reversal zone is
+    // exactly where VOLUME_SPIKE wants to see abnormal flow.
+    const oscMagnitude = Math.abs(osc) / oscAmp;       // 0..1
+    const v = (Math.random() * 200 + 100) * (1 + oscMagnitude * 2.5);
+
     klines.push({
       t: openTs,
       o: o.toFixed(2),
@@ -621,9 +677,22 @@ export function getDemoKlines(symbol: string, interval: string, limit = 100) {
       close: c,
       volume: v,
     });
-    price = c;
+    prevClose = c;
   }
   return klines;
+}
+
+/**
+ * Stable hash → [0, 2π] for sinusoidal phase, derived from the symbol so
+ * BTC / ETH / SOL klines aren't all in lock-step.
+ */
+function symbolPhase(symbol: string): number {
+  let h = 0;
+  for (let i = 0; i < symbol.length; i++) {
+    h = (h * 31 + symbol.charCodeAt(i)) | 0;
+  }
+  // Map int32 → [0, 2π]
+  return ((h >>> 0) % 1000) / 1000 * 2 * Math.PI;
 }
 
 // ----- Account data -----

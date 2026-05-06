@@ -259,6 +259,60 @@ export const SignalBot: React.FC = () => {
     }
   }, [addLog, isDemoMode]);
 
+  /**
+   * Demo-only helper: open a synthetic position immediately, bypassing
+   * the signal engine. Lets the user exercise the trade pipeline + TP/SL
+   * detection paths without waiting for an organic indicator crossover
+   * (which can be 60s × N candles in real time even with the new demo
+   * generator). The synthetic "Demo Test" signal label is preserved on
+   * the position so it's clearly distinguishable in the active-positions
+   * panel and Activity Log from any real signal-driven trades.
+   */
+  const forceTestSignal = useCallback(async (direction: 'LONG' | 'SHORT') => {
+    if (!isDemoMode) {
+      toast.error('Test signals only available in demo mode');
+      return;
+    }
+    const fresh = useBotStore.getState().signalBot;
+    if (fresh.status !== 'RUNNING') {
+      toast.error('Start the bot before firing a test signal');
+      return;
+    }
+
+    const market = fresh.isSpot ? 'spot' : 'perps';
+    let currentPrice = 0;
+    try {
+      const tickers = await fetchBookTickers(market);
+      const arr = Array.isArray(tickers) ? tickers : [];
+      const normSym = normalizeSymbol(fresh.symbol, market);
+      const ticker = arr.find((t) => (t as Record<string, unknown>).symbol === normSym) as Record<string, unknown> | undefined;
+      if (ticker) {
+        const bid = parseFloat(String(ticker.bidPrice ?? ticker.bid ?? '0'));
+        const ask = parseFloat(String(ticker.askPrice ?? ticker.ask ?? '0'));
+        currentPrice = (bid + ask) / 2;
+      }
+    } catch (e) {
+      addLog(`Test signal: price fetch failed: ${getErrorMessage(e)}`, 'error');
+      return;
+    }
+    if (currentPrice <= 0) {
+      addLog('Test signal: no price data available', 'error');
+      return;
+    }
+
+    addLog(`[DEMO TEST] Forcing ${direction} signal @ ${currentPrice.toFixed(2)}`, 'info');
+    await executeTrade(direction, currentPrice, [{
+      id: 'test-signal',
+      type: 'CUSTOM',
+      label: 'Demo Test',
+      direction,
+      strength: 100,
+      value: 0,
+      threshold: 0,
+      description: 'Manually triggered test signal',
+    }]);
+  }, [isDemoMode, addLog, executeTrade]);
+
   // Main evaluation loop.
   //
   // Runs every LOOP_INTERVAL (10s). Two concerns, separated by a timing gate:
@@ -481,6 +535,20 @@ export const SignalBot: React.FC = () => {
 
       // Combine decisions
       const decision = resolveSignals(results, afterTPSL.combineMode);
+
+      // Always log the per-tick evaluation summary — even when the decision
+      // is NONE — so the user has visible proof the bot is alive. Without
+      // this the Activity Log stays empty for entire sessions of "RSI 52,
+      // MACD flat" markets and the bot looks broken. Format is compact:
+      //   "Eval: RSI 47.3 NEUTRAL | MACD -0.0012 NEUTRAL | EMA NEUTRAL → NONE"
+      const summary = results
+        .map((r) => `${r.label} ${r.value.toFixed(r.type === 'MACD' ? 4 : 1)} ${r.direction}`)
+        .join(' | ');
+      addLog(
+        `Eval: ${summary || '(no enabled signals)'} → ${decision.action === 'NONE' ? 'NONE' : decision.action}${decision.reasoning ? ` (${decision.reasoning})` : ''}`,
+        decision.action === 'NONE' ? 'info' : 'success',
+      );
+
       if (decision.action === 'NONE') return;
 
       // Cooldown check (global, not per-position)
@@ -903,6 +971,34 @@ export const SignalBot: React.FC = () => {
         {/* Status Area */}
         <div className="flex-1 p-5 overflow-y-auto flex flex-col gap-5">
           <BotPnlStrip botKey="signal" />
+
+          {/* Demo Quick-Test panel — only in demo mode + while bot is running.
+              Lets the user fire a synthetic LONG/SHORT to exercise the trade
+              + TP/SL pipeline without waiting for an organic signal. */}
+          {isDemoMode && isLocked && (
+            <div className="glass-card p-4">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-2 flex items-center gap-2">
+                <Zap size={14} className="text-primary" /> Demo Quick-Test
+              </h3>
+              <p className="text-[11px] text-text-muted mb-3">
+                Open a synthetic position immediately to verify the trade pipeline + TP/SL detection. Bypasses signal evaluation.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => void forceTestSignal('LONG')}
+                  className="flex-1 py-2 text-xs font-medium rounded-lg border border-success/40 bg-success/10 text-success hover:bg-success/20 transition-colors"
+                >
+                  Test LONG
+                </button>
+                <button
+                  onClick={() => void forceTestSignal('SHORT')}
+                  className="flex-1 py-2 text-xs font-medium rounded-lg border border-danger/40 bg-danger/10 text-danger hover:bg-danger/20 transition-colors"
+                >
+                  Test SHORT
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Active Signals Mini Dashboard */}
           {isLocked && activeSignals.length > 0 && (
