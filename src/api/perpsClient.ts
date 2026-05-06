@@ -56,7 +56,7 @@ perpsClient.interceptors.request.use(async (config) => {
       // "api key not found" on testnet). Visible in DevTools by default.
       if (typeof window !== 'undefined') {
         // Use console.log (not debug) so it shows without filter changes.
-        // eslint-disable-next-line no-console
+         
         console.log(
           `[perpsClient] %c${isTestnet ? 'TESTNET' : 'MAINNET'}%c ${method} ${config.url}`
           + `\n  X-API-Key  = ${effectiveApiKey}`

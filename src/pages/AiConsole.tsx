@@ -344,7 +344,7 @@ export const AiConsole: React.FC = () => {
     return { id };
   }, []);
 
-  const driveTurns = useCallback(async (history: ChatMessage[], hops = 0): Promise<void> => {
+  const driveTurns = useCallback(async function driveTurnsFn(history: ChatMessage[], hops = 0): Promise<void> {
     if (hops >= MAX_TOOL_HOPS) {
       appendMessage({
         role: 'assistant',
@@ -419,7 +419,7 @@ export const AiConsole: React.FC = () => {
       toolName: result.tool,
       ts: nowMs(),
     });
-    await driveTurns(newHistory, hops + 1);
+    await driveTurnsFn(newHistory, hops + 1);
   }, [tools, appendMessage]);
 
   const sendUserMessage = useCallback(async (raw: string) => {

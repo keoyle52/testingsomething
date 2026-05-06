@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /**
  * Demo-mode engine — a self-contained in-memory simulation of SoDEX so the
  * terminal is fully explorable without any API keys.
@@ -16,7 +17,8 @@
  * a real session.
  */
 
-import { DEMO_TICKERS, DEMO_POSITIONS, DEMO_BALANCE, getDemoLivePrice } from './demoData';
+import { DEMO_TICKERS, DEMO_POSITIONS, DEMO_BALANCE } from './demoData';
+import { perpsClient } from './perpsClient';
 
 // ---------- Types ----------
 
@@ -130,6 +132,7 @@ interface DemoState {
   // Running/simulation state
   tickTimer: ReturnType<typeof setInterval> | null;
   tickListeners: Set<() => void>;
+  syncTickersTimer: ReturnType<typeof setInterval> | null;
   initialised: boolean;
   scheduledCancel: { at: number; market: Market } | null;
   leverage: Map<string, { leverage: number; marginMode: 1 | 2 }>;
@@ -145,6 +148,7 @@ const _state: DemoState = {
   nextOrderId: 100_001,
   nextTradeId: 200_001,
   tickTimer: null,
+  syncTickersTimer: null,
   tickListeners: new Set(),
   initialised: false,
   scheduledCancel: null,
@@ -229,12 +233,44 @@ function ensureInit(): void {
 function startTicker(): void {
   if (_state.tickTimer) return;
   _state.tickTimer = setInterval(tick, TICK_MS);
+  if (!_state.syncTickersTimer) {
+    _state.syncTickersTimer = setInterval(syncRealTickers, 3000);
+    void syncRealTickers();
+  }
 }
 
 function stopTicker(): void {
-  if (!_state.tickTimer) return;
-  clearInterval(_state.tickTimer);
+  if (_state.tickTimer) clearInterval(_state.tickTimer);
   _state.tickTimer = null;
+  if (_state.syncTickersTimer) clearInterval(_state.syncTickersTimer);
+  _state.syncTickersTimer = null;
+}
+
+async function syncRealTickers() {
+  try {
+    const res = await perpsClient.get('/markets/tickers');
+    const tickers = res?.data ?? res ?? [];
+    if (!Array.isArray(tickers)) return;
+    
+    for (const t of tickers) {
+      const sym = normaliseSymbolForKey(t.symbol);
+      const row = _state.tickers.get(sym);
+      if (row) {
+        const last = parseFloat(String(t.lastPx ?? t.lastPrice)) || row.lastPrice;
+        row.lastPrice = last;
+        row.markPrice = parseFloat(String(t.markPrice)) || last;
+        row.indexPrice = parseFloat(String(t.indexPrice)) || last;
+        row.bidPrice = parseFloat(String(t.bidPx ?? t.bidPrice)) || last;
+        row.askPrice = parseFloat(String(t.askPx ?? t.askPrice)) || last;
+        row.high = parseFloat(String(t.highPx ?? t.high)) || row.high;
+        row.low = parseFloat(String(t.lowPx ?? t.low)) || row.low;
+        row.volume = parseFloat(String(t.volume)) || row.volume;
+        row.quoteVolume = parseFloat(String(t.quoteVolume)) || row.quoteVolume;
+      }
+    }
+  } catch (e) {
+    // Ignore fetch errors in demo sync
+  }
 }
 
 /**
@@ -250,23 +286,6 @@ function tick(): void {
   const now = Date.now();
 
   for (const t of _state.tickers.values()) {
-    // Pass the symbol so each ticker keeps its own slow trend bias —
-    // otherwise every market would drift the same way every tick and
-    // the simulation would feel flat.
-    const newLast = getDemoLivePrice(t.lastPrice, t.symbol);
-    t.lastPrice = newLast;
-    t.markPrice = jitter(newLast, 0.0005);
-    t.indexPrice = jitter(newLast, 0.0004);
-    t.bidPrice = newLast * (1 - 0.0003 - Math.random() * 0.0005);
-    t.askPrice = newLast * (1 + 0.0003 + Math.random() * 0.0005);
-    t.bidSize = Math.random() * 20 + 5;
-    t.askSize = Math.random() * 20 + 5;
-    if (newLast > t.high) t.high = newLast;
-    if (newLast < t.low) t.low = newLast;
-    // tiny incremental volume per tick
-    const vol = Math.random() * 0.5;
-    t.volume += vol;
-    t.quoteVolume += vol * newLast;
     if (now >= t.nextFundingTime) {
       t.nextFundingTime = now + FUNDING_INTERVAL_MS;
       t.fundingRate = jitter(t.fundingRate, 0.5);
@@ -472,227 +491,6 @@ export function stopDemoEngine(): void {
 export function subscribeToDemoTicks(listener: () => void): () => void {
   _state.tickListeners.add(listener);
   return () => _state.tickListeners.delete(listener);
-}
-
-// ----- Market data -----
-
-export function getDemoTickers(_market: Market) {
-  ensureInit();
-  return Array.from(_state.tickers.values()).map((t) => ({
-    symbol: t.symbol,
-    lastPx: t.lastPrice.toFixed(2),
-    lastPrice: t.lastPrice,
-    close: t.lastPrice,
-    openPx: t.openPrice.toFixed(2),
-    highPx: t.high.toFixed(2),
-    lowPx: t.low.toFixed(2),
-    priceChangePercent: ((t.lastPrice - t.openPrice) / t.openPrice) * 100,
-    changePct: ((t.lastPrice - t.openPrice) / t.openPrice) * 100,
-    volume: t.volume.toFixed(2),
-    quoteVolume: t.quoteVolume.toFixed(2),
-    bidPx: t.bidPrice.toFixed(2),
-    askPx: t.askPrice.toFixed(2),
-    bidPrice: t.bidPrice,
-    askPrice: t.askPrice,
-    bidSz: t.bidSize.toFixed(4),
-    askSz: t.askSize.toFixed(4),
-    markPrice: t.markPrice,
-    indexPrice: t.indexPrice,
-    fundingRate: t.fundingRate,
-    nextFundingTime: t.nextFundingTime,
-    openInterest: t.openInterest,
-    openTime: Date.now() - 24 * 60 * 60 * 1000,
-    closeTime: Date.now(),
-  }));
-}
-
-export function getDemoMiniTickers(market: Market) {
-  return getDemoTickers(market).map((t) => ({
-    symbol: t.symbol,
-    lastPx: t.lastPx,
-    openPx: t.openPx,
-    highPx: t.highPx,
-    lowPx: t.lowPx,
-    volume: t.volume,
-    quoteVolume: t.quoteVolume,
-    openTime: t.openTime,
-    closeTime: t.closeTime,
-  }));
-}
-
-export function getDemoBookTickers(market: Market) {
-  return getDemoTickers(market).map((t) => ({
-    symbol: t.symbol,
-    bidPx: t.bidPx,
-    askPx: t.askPx,
-    bidSz: t.bidSz,
-    askSz: t.askSz,
-    bidPrice: t.bidPrice,
-    askPrice: t.askPrice,
-    bid: t.bidPrice,
-    ask: t.askPrice,
-  }));
-}
-
-export function getDemoMarkPrices() {
-  ensureInit();
-  return Array.from(_state.tickers.values()).map((t) => ({
-    symbol: t.symbol,
-    fundingRate: t.fundingRate,
-    nextFundingTime: t.nextFundingTime,
-    indexPrice: t.indexPrice,
-    markPrice: t.markPrice,
-    openInterest: t.openInterest,
-  }));
-}
-
-export function getDemoFundingRates() {
-  ensureInit();
-  return Array.from(_state.tickers.values()).map((t) => ({
-    symbol: t.symbol,
-    fundingRate: t.fundingRate,
-    nextFundingTime: t.nextFundingTime,
-    markPrice: t.markPrice,
-  }));
-}
-
-export function getDemoOrderbook(symbol: string, _market: Market, limit = 20) {
-  ensureInit();
-  const key = normaliseSymbolForKey(symbol);
-  const t = _state.tickers.get(key);
-  if (!t) return { blockTime: Date.now(), blockHeight: 0, updateID: 0, bids: [], asks: [] };
-  const bids: [string, string][] = [];
-  const asks: [string, string][] = [];
-  for (let i = 0; i < limit; i++) {
-    const bidP = (t.bidPrice * (1 - i * 0.0003)).toFixed(2);
-    const askP = (t.askPrice * (1 + i * 0.0003)).toFixed(2);
-    const sz = (Math.random() * 5 + 0.1).toFixed(4);
-    bids.push([bidP, sz]);
-    asks.push([askP, sz]);
-  }
-  return {
-    blockTime: Date.now(),
-    blockHeight: 1_000_000,
-    updateID: _state.nextTradeId,
-    bids,
-    asks,
-  };
-}
-
-/**
- * Generate a plausible kline series that ACTUALLY exercises the signal
- * engine. The previous implementation was a pure ±0.6% random walk, which
- * meant RSI(14) hovered in the 45–55 band, MACD histogram barely crossed
- * zero, and EMA fast/slow stayed within a fraction of a percent of each
- * other. Net result: every signal evaluator returned NEUTRAL forever and
- * the user saw "no signals" both in demo mode and (by extension) believed
- * the bot was broken in live mode too.
- *
- * The new generator overlays three components on top of the ticker's
- * `lastPrice`:
- *
- *   1. **Trend wave** (long period, ~30 candles) — large amplitude
- *      sinusoid that creates trendy stretches where EMAs cross.
- *   2. **Oscillator wave** (short period, ~8 candles) — medium amplitude
- *      sinusoid that pushes RSI(14) into the 25–75 range so oversold /
- *      overbought triggers fire several times per 100-candle window.
- *   3. **Random noise** (±0.4% per candle) — keeps the series looking
- *      organic rather than mathematically perfect.
- *
- * Each symbol gets a stable phase derived from its ticker so different
- * markets don't all signal in lock-step. Volume is also pumped at the
- * extrema of the oscillator wave so the VOLUME_SPIKE signal can fire.
- */
-export function getDemoKlines(symbol: string, interval: string, limit = 100) {
-  ensureInit();
-  const key = normaliseSymbolForKey(symbol);
-  const t = _state.tickers.get(key);
-  if (!t) return [];
-
-  const intervalMs: Record<string, number> = {
-    '1m': 60_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
-    '1h': 3_600_000, '4h': 14_400_000, '1d': 86_400_000, '1D': 86_400_000,
-    '1w': 604_800_000, '1W': 604_800_000, '1M': 2_592_000_000,
-  };
-  const step = intervalMs[interval] ?? 3_600_000;
-  const now = Date.now();
-
-  // Per-symbol stable phase so BTC, ETH, SOL klines look different but
-  // each call for the same symbol returns a similar shape.
-  const phase = symbolPhase(key);
-
-  // Tuned amplitudes — kept compact so the chart visual still looks like
-  // a normal market (single-digit % swings), but large enough that the
-  // overlaid signals push RSI into the 25–75 envelope.
-  const trendAmp = 0.045;       // ±4.5% — slow trend
-  const oscAmp = 0.018;         // ±1.8% — fast oscillator
-  const trendPeriod = 30;       // candles per cycle
-  const oscPeriod = 8;
-  const noiseAmp = 0.004;       // ±0.4% noise
-
-  const base = t.lastPrice;
-  const klines: Record<string, unknown>[] = [];
-  let prevClose = base;
-
-  for (let i = limit - 1; i >= 0; i--) {
-    // `i` decreases as we move forward in time. Index from the FAR-END of
-    // the window so the LAST candle (i=0) lands close to the current
-    // ticker price.
-    const candleIdx = (limit - 1) - i;
-    const openTs = now - i * step;
-
-    const trend = Math.sin((candleIdx / trendPeriod) * 2 * Math.PI + phase) * trendAmp;
-    const osc   = Math.sin((candleIdx / oscPeriod)   * 2 * Math.PI + phase * 1.7) * oscAmp;
-    const noise = (Math.random() * 2 - 1) * noiseAmp;
-
-    const target = base * (1 + trend + osc + noise);
-    // Open from the previous close so the wick chain is continuous.
-    const o = prevClose;
-    const c = Math.max(0.0001, target);
-
-    // High/low extend slightly beyond the candle body. Bias depends on
-    // whether the candle is up or down so wicks look natural.
-    const wickAmp = base * 0.003 * (0.5 + Math.random());
-    const h = Math.max(o, c) + wickAmp * Math.random();
-    const l = Math.min(o, c) - wickAmp * Math.random();
-
-    // Volume amplified at oscillator extremes — a 1.8% reversal zone is
-    // exactly where VOLUME_SPIKE wants to see abnormal flow.
-    const oscMagnitude = Math.abs(osc) / oscAmp;       // 0..1
-    const v = (Math.random() * 200 + 100) * (1 + oscMagnitude * 2.5);
-
-    klines.push({
-      t: openTs,
-      o: o.toFixed(2),
-      h: h.toFixed(2),
-      l: l.toFixed(2),
-      c: c.toFixed(2),
-      v: v.toFixed(4),
-      q: (v * c).toFixed(2),
-      time: openTs,
-      openTime: openTs,
-      open: o,
-      high: h,
-      low: l,
-      close: c,
-      volume: v,
-    });
-    prevClose = c;
-  }
-  return klines;
-}
-
-/**
- * Stable hash → [0, 2π] for sinusoidal phase, derived from the symbol so
- * BTC / ETH / SOL klines aren't all in lock-step.
- */
-function symbolPhase(symbol: string): number {
-  let h = 0;
-  for (let i = 0; i < symbol.length; i++) {
-    h = (h * 31 + symbol.charCodeAt(i)) | 0;
-  }
-  // Map int32 → [0, 2π]
-  return ((h >>> 0) % 1000) / 1000 * 2 * Math.PI;
 }
 
 // ----- Account data -----

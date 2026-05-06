@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { wsService } from './websocket';
 import { useSettingsStore } from '../store/settingsStore';
-import { subscribeToDemoTicks, getDemoTickers } from './demoEngine';
 
 export interface LiveTicker {
   symbol: string;
@@ -9,34 +8,6 @@ export interface LiveTicker {
   change24h: number;
   volume24h: number;
   markPrice?: number;
-}
-
-// ─── Demo mode: subscribe to the demo engine's per-tick notification ─────────
-function useDemoTickers(market: 'spot' | 'perps'): LiveTicker[] {
-  const [tickers, setTickers] = useState<LiveTicker[]>(() => mapDemoSnapshot(market));
-
-  useEffect(() => {
-    // Initial snapshot + live subscription. The engine is started elsewhere
-    // in the app boot sequence when `isDemoMode` flips on.
-    setTickers(mapDemoSnapshot(market));
-    const unsub = subscribeToDemoTicks(() => {
-      setTickers(mapDemoSnapshot(market));
-    });
-    return unsub;
-  }, [market]);
-
-  return tickers;
-}
-
-function mapDemoSnapshot(market: 'spot' | 'perps'): LiveTicker[] {
-  const rows = getDemoTickers(market);
-  return rows.map((t) => ({
-    symbol: t.symbol,
-    lastPrice: t.lastPrice,
-    change24h: t.priceChangePercent,
-    volume24h: parseFloat(String(t.quoteVolume)),
-    markPrice: t.markPrice,
-  }));
 }
 
 // ─── Real WebSocket mode ─────────────────────────────────────────────────────
@@ -81,30 +52,17 @@ function useWsTickers(symbols: string[], isTestnet: boolean): LiveTicker[] {
 // ─── Public Hook ─────────────────────────────────────────────────────────────
 /**
  * Returns live ticker data.
- * - In demo mode: simulates price ticks from mock data every 2s.
- * - In live mode: subscribes to SoDEX WebSocket miniTicker channel.
+ * Subscribes to SoDEX WebSocket miniTicker channel.
  */
 export function useLiveTicker(
   initialTickers: LiveTicker[],
   symbols: string[],
-  /** Which venue to subscribe to. Defaults to 'perps' for back-compat
-   *  with existing call sites (Dashboard etc.). Spot pages should pass
-   *  'spot' explicitly so the demo snapshot and the WebSocket
-   *  channel target the right symbol set. */
-  market: 'spot' | 'perps' = 'perps',
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _market: 'spot' | 'perps' = 'perps',
 ): LiveTicker[] {
-  const { isDemoMode, isTestnet } = useSettingsStore();
+  const { isTestnet } = useSettingsStore();
 
-  const demoTickers = useDemoTickers(market);
-  const wsTickers   = useWsTickers(isDemoMode ? [] : symbols, isTestnet);
-
-  if (isDemoMode) {
-    // Ensure that consumers that seed from `initialTickers` still see only
-    // the requested symbol set if any; otherwise return the full feed.
-    if (initialTickers.length === 0) return demoTickers;
-    const byKey = new Map(demoTickers.map((t) => [t.symbol, t]));
-    return initialTickers.map((t) => byKey.get(t.symbol) ?? t);
-  }
+  const wsTickers = useWsTickers(symbols, isTestnet);
 
   // Merge: ws data overrides initial where available, fall back to initial
   if (wsTickers.length > 0) {
@@ -123,12 +81,10 @@ export function useLiveTicker(
 export function useLivePrice(
   symbol: string,
   fallback = 0,
-  /** Venue to read from. Defaults to 'perps' for back-compat. Spot
-   *  symbols (e.g. BTC_USDC) won't be in the perps demo snapshot, so
-   *  spot consumers must opt in explicitly. */
-  market: 'spot' | 'perps' = 'perps',
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _market: 'spot' | 'perps' = 'perps',
 ): number {
-  const { isDemoMode, isTestnet } = useSettingsStore();
+  const { isTestnet } = useSettingsStore();
   const [price, setPrice] = useState(fallback);
   const baseRef = useRef(fallback);
 
@@ -136,25 +92,9 @@ export function useLivePrice(
     baseRef.current = fallback > 0 ? fallback : baseRef.current;
   }, [fallback]);
 
-  // Demo mode: subscribe to the engine tick for the requested symbol.
-  useEffect(() => {
-    if (!isDemoMode || !symbol) return;
-    const readFromEngine = () => {
-      const rows = getDemoTickers(market);
-      const target = rows.find((t) => t.symbol === symbol);
-      if (target && target.lastPrice > 0) {
-        setPrice(target.lastPrice);
-        baseRef.current = target.lastPrice;
-      }
-    };
-    readFromEngine();
-    const unsub = subscribeToDemoTicks(readFromEngine);
-    return unsub;
-  }, [isDemoMode, symbol, market]);
-
   // WS mode
   useEffect(() => {
-    if (isDemoMode || !symbol) return;
+    if (!symbol) return;
     try { wsService.connect(isTestnet); } catch { return; }
     const channelParam = JSON.stringify({ channel: 'miniTicker', symbols: [symbol] });
     const unsub = wsService.subscribe(channelParam, (raw) => {
@@ -167,7 +107,7 @@ export function useLivePrice(
       }
     });
     return () => unsub();
-  }, [symbol, isTestnet, isDemoMode]);
+  }, [symbol, isTestnet]);
 
   return price;
 }

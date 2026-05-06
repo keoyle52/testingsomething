@@ -87,7 +87,7 @@ export const TradingChart: React.FC<TradingChartProps> = ({
       chartRef.current = null;
       seriesRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [height]);
 
   useEffect(() => {

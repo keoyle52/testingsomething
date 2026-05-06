@@ -103,11 +103,11 @@ class WebSocketService {
   // Expect params inside channel string or raw JSON parseable. 
   // Backward compatibility: If channel is pure string e.g. "ticker", we'll wrap it.
   subscribe(channel: string, handler: MessageHandler): () => void {
-    let subParams: any = { channel };
+    let subParams: unknown = { channel };
     try {
       const parsed = JSON.parse(channel);
       if (typeof parsed === 'object') subParams = parsed;
-    } catch {}
+    } catch { /* empty */ }
 
     const channelKey = JSON.stringify(subParams);
 

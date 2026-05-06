@@ -391,7 +391,7 @@ function evalCustom(klines: CandleData[], config: SignalConfig): SignalResult {
     const emaVal = (p: number) => { const e = ema(closes, p); return e[e.length - 1] ?? 0; };
     const smaVal = (p: number) => { const s = sma(closes, p); return s[s.length - 1] ?? 0; };
     const last = klines[klines.length - 1];
-    // eslint-disable-next-line no-new-func
+     
     const fn = new Function('rsi', 'ema', 'sma', 'close', 'open', 'high', 'low', 'volume', 'klines', expr);
     const val = fn(rsiVal, emaVal, smaVal, last?.close ?? 0, last?.open ?? 0, last?.high ?? 0, last?.low ?? 0, last?.volume ?? 0, klines);
     const numVal = Number(val);

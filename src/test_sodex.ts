@@ -29,17 +29,17 @@ async function runTest() {
      // Try accountID first
      try {
        await perpsClient.post('/trade/orders', { ...payload, accountID: 46502, symbolID: 1 });
-     } catch (e: any) {
+     } catch (e: any) { // eslint-disable-line @typescript-eslint/no-explicit-any
        console.log('With accountID / symbolID:', e.message);
      }
      
      // Try accountId
      try {
        await perpsClient.post('/trade/orders', { ...payload, accountId: 46502, symbolId: 1 });
-     } catch (e: any) {
+     } catch (e: any) { // eslint-disable-line @typescript-eslint/no-explicit-any
        console.log('With accountId / symbolId:', e.message);
      }
-  } catch (e: any) {
+  } catch (e: any) { // eslint-disable-line @typescript-eslint/no-explicit-any
      console.error('Fatal:', e);
   }
 }

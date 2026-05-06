@@ -36,7 +36,7 @@ export const BtcTreasuries: React.FC = () => {
 
   // Async load helper — wrapped in useCallback so the effect body has no
   // synchronous setState calls (React-Compiler purity rule).
-  const refresh = useCallback(async () => { // eslint-disable-line react-hooks/exhaustive-deps
+  const refresh = useCallback(async () => {  
     try {
       const [list, agg] = await Promise.all([
         fetchBtcTreasuries(),
@@ -62,7 +62,7 @@ export const BtcTreasuries: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [isDemoMode]);
 
   // Initial company list + 30d aggregate — async work, no setState in body.

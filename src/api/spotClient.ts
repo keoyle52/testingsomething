@@ -53,7 +53,7 @@ spotClient.interceptors.request.use(async (config) => {
       config.headers['X-API-Sign'] = signature;
 
       if (typeof window !== 'undefined') {
-        // eslint-disable-next-line no-console
+         
         console.log(
           `[spotClient] %c${isTestnet ? 'TESTNET' : 'MAINNET'}%c ${method} ${config.url}`
           + `\n  X-API-Key  = ${effectiveApiKey}`

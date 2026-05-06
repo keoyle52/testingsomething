@@ -11,13 +11,6 @@ import {
   demoReplaceOrders,
   demoScheduleCancelAll,
   demoUpdateLeverage,
-  getDemoTickers,
-  getDemoMiniTickers,
-  getDemoBookTickers,
-  getDemoMarkPrices,
-  getDemoFundingRates,
-  getDemoOrderbook,
-  getDemoKlines,
   getDemoBalances,
   getDemoPositions,
   getDemoOpenOrders,
@@ -246,43 +239,11 @@ function parseOrderIdNumeric(orderId: string): number {
 // ---------- Market Data (Public) ----------
 
 export async function fetchSymbols(market: 'spot' | 'perps' = 'perps') {
-  if (isDemo()) {
-    // Derive a minimal symbol list from the demo ticker snapshot so callers
-    // like `fetchSymbolEntry` still get a sensible record for any symbol.
-    return getDemoTickers(market).map((t) => ({
-      symbol: t.symbol,
-      name: t.symbol,
-      symbolID: Math.abs(hashCode(t.symbol)) % 10_000 + 1,
-      pricePrecision: 2,
-      tickSize: '0.01',
-      quantityPrecision: 4,
-      stepSize: '0.0001',
-      minQuantity: '0.0001',
-      maxQuantity: '1000000',
-      marketMinQuantity: '0.0001',
-      marketMaxQuantity: '1000000',
-      minNotional: '1',
-      maxNotional: '10000000',
-      maxLeverage: 25,
-      initLeverage: 5,
-      lastTradePrice: String(t.lastPrice),
-      status: 'TRADING',
-    }));
-  }
   const client = getClient(market);
   const res = await withRetry(() => client.get('/markets/symbols'));
   return res?.data ?? res ?? [];
 }
 
-/** Deterministic 32-bit hash used to generate stable demo symbolIDs. */
-function hashCode(str: string): number {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) {
-    h = ((h << 5) - h) + str.charCodeAt(i);
-    h |= 0;
-  }
-  return h;
-}
 
 export interface SymbolPrecision {
   symbolID: number;
@@ -710,7 +671,6 @@ export async function fetchSpotSymbolID(symbol: string): Promise<number | null> 
 }
 
 export async function fetchTickers(market: 'spot' | 'perps' = 'perps') {
-  if (isDemo()) return getDemoTickers(market);
   const cacheKey = `${getNetworkTag()}:${market}`;
   const cached = _tickersCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < QUOTE_CACHE_TTL) {
@@ -735,14 +695,12 @@ export async function fetchTickers(market: 'spot' | 'perps' = 'perps') {
 }
 
 export async function fetchMiniTickers(market: 'spot' | 'perps' = 'perps') {
-  if (isDemo()) return getDemoMiniTickers(market);
   const client = getClient(market);
   const res = await withRetry(() => client.get('/markets/miniTickers'));
   return res?.data ?? res ?? [];
 }
 
 export async function fetchBookTickers(market: 'spot' | 'perps' = 'perps') {
-  if (isDemo()) return getDemoBookTickers(market);
   const client = getClient(market);
   const res = await withRetry(() => client.get('/markets/bookTickers'));
   const raw = res?.data ?? res ?? [];
@@ -787,7 +745,6 @@ function normalizeOrderbookLevel(raw: unknown): [string, string] | [null, null] 
 }
 
 export async function fetchOrderbook(symbol: string, market: 'spot' | 'perps' = 'perps', limit = 20) {
-  if (isDemo()) return getDemoOrderbook(symbol, market, limit);
   const sym = normalizeSymbol(symbol, market);
   const cacheKey = `${getNetworkTag()}:${market}:${sym}:${limit}`;
   const cached = _orderbookCache.get(cacheKey);
@@ -821,7 +778,6 @@ export async function fetchKlines(
   market: 'spot' | 'perps' = 'perps',
   options?: { bypassCache?: boolean },
 ) {
-  if (isDemo()) return getDemoKlines(symbol, interval, limit);
   const sym = normalizeSymbol(symbol, market);
   const cacheKey = `${getNetworkTag()}:${market}:${sym}:${interval}:${limit}`;
   // Bot loops pass `bypassCache: true` so every signal evaluation works on
@@ -861,13 +817,11 @@ export async function fetchCoins(market: 'spot' | 'perps' = 'perps') {
 }
 
 export async function fetchMarkPrices() {
-  if (isDemo()) return getDemoMarkPrices();
   const res = await withRetry(() => perpsClient.get('/markets/mark-prices'));
   return res?.data ?? res ?? [];
 }
 
 export async function fetchFundingRates() {
-  if (isDemo()) return getDemoFundingRates();
   // SoDEX exposes funding rate as part of the tickers payload (fundingRate +
   // nextFundingTime per symbol). There is no reliable standalone
   // `/markets/funding-rates` endpoint, so derive from tickers — the same
