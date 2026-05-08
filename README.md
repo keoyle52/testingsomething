@@ -3,6 +3,7 @@
 [![SoSoValue Buildathon](https://img.shields.io/badge/SoSoValue-Buildathon-blueviolet?style=for-the-badge)](https://sosovalue.com/)
 [![SoDEX Protocol](https://img.shields.io/badge/SoDEX-Protocol-emerald?style=for-the-badge)](https://sodex.com/join/KEOLE)
 [![Powered by Gemini](https://img.shields.io/badge/Powered%20by-Google%20Gemini-orange?style=for-the-badge)](https://deepmind.google/technologies/gemini/)
+[![Live Demo](https://img.shields.io/badge/🔴_LIVE-DEMO-red?style=for-the-badge)](https://sodexterminal.vercel.app)
 
 > **The ultimate "One-Person On-Chain Hedge Fund" terminal.** Sodex PowerOps leverages high-frequency SoSoValue data, institutional flow analysis, and Google Gemini AI to orchestrate autonomous trading agents on the SoDEX ValueChain.
 
